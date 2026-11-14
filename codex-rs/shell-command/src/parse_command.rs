@@ -1023,6 +1023,30 @@ mod tests {
         assert!(has_unknown("python3 -m http.server 8000"));
     }
 
+    // Security review: a command hidden in the `if` test must not be dropped.
+    #[test]
+    fn concise_if_condition_process_substitution_is_unknown() {
+        assert!(has_unknown(
+            "if [ -e <(rm -rf build) ]; then sed -n '1,5p' a.md; fi"
+        ));
+    }
+
+    // Security review: loop expansion is bounded and not recursive.
+    #[test]
+    fn concise_for_loop_value_cap() {
+        let values = (0..17).map(|i| format!("f{i}.md")).collect::<Vec<_>>().join(" ");
+        assert!(has_unknown(&format!(
+            "for f in {values}; do sed -n '1,5p' \"$f\"; done"
+        )));
+    }
+
+    #[test]
+    fn concise_nested_for_is_unknown() {
+        assert!(has_unknown(
+            "for a in x y; do for b in p q; do sed -n '1,5p' \"$b\"; done; done"
+        ));
+    }
+
     #[test]
     fn drops_yes_in_pipelines() {
         // Inside bash -lc, `yes | rg --files` should focus on the primary command.
@@ -2094,8 +2118,11 @@ fn desugar_for_display(script: &str) -> Option<String> {
     for (start, end, text) in edits {
         out.replace_range(start..end, &text);
     }
-    Some(out)
+    (out.len() <= MAX_DESUGARED_BYTES).then_some(out)
 }
+
+const MAX_DESUGAR_LOOP_VALUES: usize = 16;
+const MAX_DESUGARED_BYTES: usize = 8 * 1024;
 
 fn collect_desugar_edits(
     node: tree_sitter::Node,
@@ -2158,11 +2185,31 @@ fn desugar_if(node: tree_sitter::Node, src: &str) -> Option<String> {
     let [condition] = conditions.as_slice() else {
         return None;
     };
-    let condition_text = condition.utf8_text(src.as_bytes()).ok()?;
-    if condition.kind() != "test_command" || condition_text.contains(['$', '`']) {
+    if condition.kind() != "test_command" || !only_plain_test_nodes(*condition) {
         return None;
     }
     body_between(node, src, "then", "fi")
+}
+
+/// True when every named node under a `[ … ]` test is a literal word/string/operator, so
+/// dropping the test can't hide a command (rejects `$(…)`, `<(…)`, `$x`, `$((…))`, etc.).
+fn only_plain_test_nodes(node: tree_sitter::Node) -> bool {
+    const ALLOWED: &[&str] = &[
+        "test_command",
+        "unary_expression",
+        "binary_expression",
+        "test_operator",
+        "word",
+        "string",
+        "string_content",
+        "raw_string",
+        "number",
+    ];
+    let mut cursor = node.walk();
+    node.children(&mut cursor).all(|child| {
+        (!child.is_named() && !matches!(child.kind(), "<(" | ">(" | "$(" | "`" | "$"))
+            || (ALLOWED.contains(&child.kind()) && only_plain_test_nodes(child))
+    })
 }
 
 fn desugar_for(node: tree_sitter::Node, src: &str) -> Option<String> {
@@ -2182,7 +2229,7 @@ fn desugar_for(node: tree_sitter::Node, src: &str) -> Option<String> {
             literal.then_some(text)
         })
         .collect::<Option<_>>()?;
-    if values.is_empty() {
+    if values.is_empty() || values.len() > MAX_DESUGAR_LOOP_VALUES {
         return None;
     }
     let body = body_between(node.child_by_field_name("body")?, src, "do", "done")?;
@@ -2221,8 +2268,9 @@ fn substitute_shell_var(body: &str, variable: &str, value: &str) -> String {
 
 /// Parses command metadata from a Bash-compatible shell script.
 pub fn parse_shell_script(script: &str) -> Vec<ParsedCommand> {
+    // One desugaring pass only; the result is parsed strictly (no further rewriting).
     if let Some(desugared) = desugar_for_display(script) {
-        let parsed = parse_shell_script(&desugared);
+        let parsed = parse_shell_script_strict(&desugared);
         if !parsed
             .iter()
             .any(|p| matches!(p, ParsedCommand::Unknown { .. }))
@@ -2230,6 +2278,10 @@ pub fn parse_shell_script(script: &str) -> Vec<ParsedCommand> {
             return parsed;
         }
     }
+    parse_shell_script_strict(script)
+}
+
+fn parse_shell_script_strict(script: &str) -> Vec<ParsedCommand> {
     if let Some(tree) = try_parse_shell(script)
         && let Some(all_commands) = try_parse_word_only_commands_sequence(&tree, script)
         && !all_commands.is_empty()
