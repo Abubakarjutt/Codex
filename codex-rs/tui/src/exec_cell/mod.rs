@@ -1,4 +1,5 @@
 mod compact;
+mod concise;
 mod edit_detect;
 mod live_output;
 mod model;

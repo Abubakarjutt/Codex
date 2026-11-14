@@ -1,8 +1,9 @@
 ---
 source: tui/src/tool_output_tests.rs
+assertion_line: 23
 expression: "preview.iter().map(ToString::to_string).collect::<Vec<_>>().join(\"\\n\")"
 ---
 first
 https://
 example.test/a/
-+9 lines (⌃t to…
+… +9 lines (⌃t …

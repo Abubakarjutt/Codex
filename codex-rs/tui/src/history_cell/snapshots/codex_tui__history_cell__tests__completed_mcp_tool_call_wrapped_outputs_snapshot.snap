@@ -1,5 +1,6 @@
 ---
 source: tui/src/history_cell/tests.rs
+assertion_line: 1836
 expression: rendered
 ---
 • Called
@@ -10,4 +11,4 @@ expression: rendered
     Line one of the response, which is
     quite long and needs wrapping.
     Line two continues the response with
-    +1 line (⌃t to view transcript)
+    … +1 line (⌃t to expand)

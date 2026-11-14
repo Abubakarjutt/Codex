@@ -1,7 +1,6 @@
 ---
-source: tui/src/chatwidget/tests.rs
-expression: active_blob(&chat)
+source: tui/src/chatwidget/tests/exec_flow.rs
+expression: "&explored_foo"
 ---
-• Explored
-  └ List ls -la
-    Read foo.txt
+⏺ List(ls -la)
+⏺ Read(foo.txt)

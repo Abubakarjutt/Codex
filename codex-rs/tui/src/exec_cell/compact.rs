@@ -1,5 +1,12 @@
 //! Owned-transcript command previews with full command/output retained for local disclosure.
 
+use super::concise::MARKER;
+use super::concise::OUTPUT_FIRST_PREFIX;
+use super::concise::OUTPUT_PREFIX_WIDTH;
+use super::concise::OUTPUT_REST_PREFIX;
+use super::concise::command_label;
+use super::concise::exit_suffix;
+use super::concise::first_line;
 use super::model::ExecCell;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell::ActivityDisclosure;
@@ -9,7 +16,6 @@ use crate::history_cell::activity_preview::clipped_line;
 use crate::motion::MotionMode;
 use crate::motion::ReducedMotionIndicator;
 use crate::motion::activity_indicator;
-use crate::render::highlight::highlight_bash_to_lines;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use codex_ansi_escape::ansi_escape_line;
 use ratatui::style::Modifier;
@@ -30,7 +36,10 @@ impl ExecCell {
                 .lines()
                 .rev()
                 .take(DETAIL_PREVIEW_LINES)
-                .filter(|raw| ansi_escape_line(raw.as_ref()).width() + 4 > usize::from(width))
+                .filter(|raw| {
+                    ansi_escape_line(raw.as_ref()).width() + OUTPUT_PREFIX_WIDTH
+                        > usize::from(width)
+                })
                 .count();
             let hidden = retained.saturating_sub(DETAIL_PREVIEW_LINES) + clipped;
             if hidden > 0 {
@@ -59,7 +68,8 @@ impl ExecCell {
             .is_some_and(|output| {
                 output.line_counts().1 > DETAIL_PREVIEW_LINES
                     || output.transcript_lines().any(|line| {
-                        ansi_escape_line(line.as_ref()).width() + 4 > usize::from(width)
+                        ansi_escape_line(line.as_ref()).width() + OUTPUT_PREFIX_WIDTH
+                            > usize::from(width)
                     })
             })
             .then_some(ActivityDisclosure::Generic)
@@ -79,44 +89,46 @@ impl ExecCell {
         }
         let nonzero_exit = call.output.as_ref().filter(|output| output.exit_code != 0);
         let marker = if nonzero_exit.is_some() {
-            "•".bold()
+            MARKER.red().bold()
         } else if self.is_active() {
             activity_indicator(
                 call.start_time,
                 MotionMode::from_animations_enabled(self.animations_enabled()),
-                ReducedMotionIndicator::StaticBullet,
+                ReducedMotionIndicator::Hidden,
             )
-            .unwrap_or_else(|| "•".dim())
+            .unwrap_or_else(|| MARKER.dim())
         } else {
-            "•".green().bold()
+            MARKER.green().bold()
         };
-        let title = if let Some(output) = nonzero_exit {
-            format!("Exited (status {})", output.exit_code)
-        } else if self.is_active() {
-            "Running".to_owned()
-        } else if call.is_unified_exec_interaction() {
-            "Background output".to_owned()
+        let mut header = Line::from(vec![marker, " ".into()]);
+        let mut is_update = false;
+        if call.is_unified_exec_interaction() {
+            // Background polls have no command of their own to label.
+            let script = strip_bash_lc_and_escape(&call.command);
+            header.push_span("Background output ".bold());
+            header.push_span(first_line(&script));
         } else {
-            "Ran".to_owned()
-        };
-        let script = strip_bash_lc_and_escape(&call.command);
-        // Highlight before clipping so the compact row keeps the same shell token colors.
-        let mut command_lines = highlight_bash_to_lines(&script).into_iter();
-        let mut header = command_lines.next().unwrap_or_default();
-        header
-            .spans
-            .splice(0..0, [marker, " ".into(), title.bold(), " ".into()]);
-        if command_lines.next().is_some() {
-            header.push_span(" …");
+            let (label, update) = command_label(&call.command);
+            is_update = update;
+            header.spans.extend(label);
+        }
+        if let Some(output) = nonzero_exit {
+            header.push_span(exit_suffix(output.exit_code, /*benign*/ false));
         }
         let mut lines = vec![clipped_line(header, width)];
-        if let Some(output) = &call.output {
+        let show_output = !is_update || nonzero_exit.is_some();
+        if let Some(output) = call.output.as_ref().filter(|_| show_output) {
             let tail: Vec<_> = output.lines().rev().take(DETAIL_PREVIEW_LINES).collect();
             for (index, raw) in tail.into_iter().rev().enumerate() {
                 let mut line = ansi_escape_line(raw.as_ref());
                 line.spans.insert(
                     /*index*/ 0,
-                    if index == 0 { "  └ " } else { "    " }.dim(),
+                    if index == 0 {
+                        OUTPUT_FIRST_PREFIX
+                    } else {
+                        OUTPUT_REST_PREFIX
+                    }
+                    .dim(),
                 );
                 line.spans.iter_mut().for_each(|span| {
                     span.style = span.style.add_modifier(Modifier::DIM);
@@ -124,7 +136,10 @@ impl ExecCell {
                 lines.push(clipped_line(line, width));
             }
             if lines.len() == 1 && !call.is_unified_exec_interaction() {
-                lines.push(clipped_line(Line::from("  └ (no output)".dim()), width));
+                lines.push(clipped_line(
+                    Line::from(format!("{OUTPUT_FIRST_PREFIX}(no output)").dim()),
+                    width,
+                ));
             }
         }
         lines

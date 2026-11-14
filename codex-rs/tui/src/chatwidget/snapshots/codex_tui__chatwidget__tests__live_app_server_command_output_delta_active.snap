@@ -1,7 +1,8 @@
 ---
 source: tui/src/chatwidget/tests/app_server.rs
+assertion_line: 1435
 expression: active
 ---
-• Running printf 'stdout\nstderr\n'
-  └ stdout
-    stderr
+• Bash(printf 'stdout\nstderr\n')
+  ⎿  stdout
+     stderr

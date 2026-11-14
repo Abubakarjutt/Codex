@@ -2,6 +2,8 @@
 
 use std::time::Instant;
 
+use super::concise;
+use super::edit_detect::edited_paths;
 use super::model::CommandOutput;
 use super::model::ExecCall;
 use super::model::ExecCell;
@@ -9,13 +11,13 @@ use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell::ActivityDisclosure;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::HistoryRenderMode;
+use crate::history_cell::activity_preview::clipped_line;
 use crate::history_cell::plain_lines;
 use crate::motion::MotionMode;
 use crate::motion::ReducedMotionIndicator;
 use crate::motion::activity_indicator;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::line_utils::line_to_static;
-use crate::style::accent_color;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::LogicalLineSource;
 use crate::terminal_hyperlinks::adaptive_wrap_hyperlink_lines;
@@ -204,9 +206,9 @@ fn activity_marker(start_time: Option<Instant>, animations_enabled: bool) -> Spa
     activity_indicator(
         start_time,
         MotionMode::from_animations_enabled(animations_enabled),
-        ReducedMotionIndicator::StaticBullet,
+        ReducedMotionIndicator::Hidden,
     )
-    .unwrap_or_else(|| "•".dim())
+    .unwrap_or_else(|| concise::MARKER.dim())
 }
 
 impl HistoryCell for ExecCell {
@@ -239,33 +241,21 @@ impl HistoryCell for ExecCell {
             return self.display_hyperlink_lines(width);
         }
         if self.is_exploring_cell() {
-            let mut lines = self.exploring_display_lines(width);
-            lines.truncate(1 + crate::history_cell::activity_preview::DETAIL_PREVIEW_LINES);
-            let nonzero_exits = self
-                .group
-                .calls
-                .iter()
-                .filter(|call| {
-                    call.output
-                        .as_ref()
-                        .is_some_and(|output| output.exit_code != 0)
-                })
-                .count();
-            if nonzero_exits > 0
-                && let Some(header) = lines.first_mut()
-            {
-                let exit_label = if nonzero_exits == 1 {
-                    "nonzero exit"
-                } else {
-                    "nonzero exits"
-                };
-                header
-                    .line
-                    .push_span(format!(" · {nonzero_exits} {exit_label}").bold());
+            let mut rows = self.exploring_rows(width);
+            let keep = 1 + crate::history_cell::activity_preview::DETAIL_PREVIEW_LINES;
+            if rows.len() <= keep {
+                return rows.into_iter().map(|(line, _)| line).collect();
             }
-            lines
-                .into_iter()
-                .map(|line| crate::history_cell::activity_preview::clipped_line(line.line, width))
+            let hidden = rows.split_off(keep);
+            // Each visible row shows its own exit; only failures in the hidden rows need a count.
+            let hidden_failures = hidden.iter().filter(|(_, failed)| *failed).count();
+            let mut more = Line::from(format!("  … +{} more", hidden.len()).dim());
+            if hidden_failures > 0 {
+                more.push_span(format!(" · {hidden_failures} failed").red());
+            }
+            rows.into_iter()
+                .map(|(line, _)| line)
+                .chain(std::iter::once(clipped_line(more, width)))
                 .collect()
         } else {
             self.compact_command_lines(width)
@@ -322,7 +312,14 @@ impl HistoryCell for ExecCell {
                         "Listed files in",
                         path.as_deref().unwrap_or(".").to_owned(),
                     ),
-                    _ => ("Running", "Ran", strip_bash_lc_and_escape(&call.command)),
+                    _ => match edited_paths(&call.command) {
+                        Some(paths) => ("Updating", "Updated", paths.join(", ")),
+                        None => (
+                            "Running",
+                            "Ran",
+                            concise::first_line(&strip_bash_lc_and_escape(&call.command)),
+                        ),
+                    },
                 };
                 let verb = if active { running } else { finished };
                 let mut label = format!("{verb} {target}");
@@ -360,47 +357,33 @@ impl ExecCell {
     }
 
     fn exploring_display_lines(&self, width: u16) -> Vec<HyperlinkLine> {
-        let mut out: Vec<HyperlinkLine> = Vec::new();
-        out.push(
-            Line::from(vec![
-                if self.is_active() {
-                    activity_marker(self.active_start_time(), self.animations_enabled())
-                } else {
-                    "•".dim()
-                },
-                " ".into(),
-                if self.is_active() {
-                    "Exploring".bold()
-                } else {
-                    "Explored".bold()
-                },
-            ])
-            .into(),
-        );
+        self.exploring_rows(width)
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect()
+    }
 
+    /// One clipped row per exploring action group, flagged when it failed.
+    fn exploring_rows(&self, width: u16) -> Vec<(HyperlinkLine, bool)> {
+        let mut out: Vec<(HyperlinkLine, bool)> = Vec::new();
         let mut calls = self.group.calls.as_slice();
-        let mut out_indented = Vec::new();
         let nonzero_exit = |call: &ExecCall| {
             call.duration
                 .and(call.output.as_ref())
                 .map(|output| output.exit_code)
                 .filter(|code| *code != 0)
         };
+        let is_read = |parsed: &ParsedCommand| matches!(parsed, ParsedCommand::Read { .. });
         while let Some((call, remaining)) = calls.split_first() {
             let exit_code = nonzero_exit(call);
-            let reads_only = call
-                .parsed
-                .iter()
-                .all(|parsed| matches!(parsed, ParsedCommand::Read { .. }));
+            let reads_only = !call.parsed.is_empty() && call.parsed.iter().all(is_read);
             let group_len = if reads_only && exit_code.is_none() {
                 1 + remaining
                     .iter()
                     .take_while(|next| {
                         nonzero_exit(next).is_none()
-                            && next
-                                .parsed
-                                .iter()
-                                .all(|parsed| matches!(parsed, ParsedCommand::Read { .. }))
+                            && !next.parsed.is_empty()
+                            && next.parsed.iter().all(is_read)
                     })
                     .count()
             } else {
@@ -409,90 +392,43 @@ impl ExecCell {
             let (group, remaining) = calls.split_at(group_len);
             calls = remaining;
 
-            let call_lines: Vec<(&str, Vec<Span<'static>>)> = if reads_only {
-                let names = group
+            let label = if reads_only {
+                let names: Vec<String> = group
                     .iter()
                     .flat_map(|call| &call.parsed)
-                    .map(|parsed| match parsed {
-                        ParsedCommand::Read { name, .. } => name.clone(),
-                        _ => unreachable!(),
+                    .filter_map(|parsed| match parsed {
+                        ParsedCommand::Read { name, .. } => Some(name.clone()),
+                        _ => None,
                     })
-                    .unique();
-                vec![(
-                    "Read",
-                    Itertools::intersperse(names.into_iter().map(Into::into), ", ".dim()).collect(),
-                )]
+                    .unique()
+                    .collect();
+                concise::reads_label(&names)
+            } else if call.parsed.is_empty() {
+                concise::command_label(&call.command).0
             } else {
-                let mut lines = Vec::new();
-                for parsed in &call.parsed {
-                    match parsed {
-                        ParsedCommand::Read { name, .. } => {
-                            lines.push(("Read", vec![name.clone().into()]));
-                        }
-                        ParsedCommand::ListFiles { cmd, path } => {
-                            lines.push(("List", vec![path.clone().unwrap_or(cmd.clone()).into()]));
-                        }
-                        ParsedCommand::Search { cmd, query, path } => {
-                            let spans = match (query, path) {
-                                (Some(q), Some(p)) => {
-                                    vec![q.clone().into(), " in ".dim(), p.clone().into()]
-                                }
-                                (Some(q), None) => vec![q.clone().into()],
-                                _ => vec![cmd.clone().into()],
-                            };
-                            lines.push(("Search", spans));
-                        }
-                        ParsedCommand::Unknown { cmd } => {
-                            lines.push(("Run", vec![cmd.clone().into()]));
-                        }
-                    }
-                }
-                lines
+                concise::parsed_label(&call.parsed)
             };
-
-            let line_count = call_lines.len();
-            for (index, (title, mut line)) in call_lines.into_iter().enumerate() {
-                if let Some(code) = exit_code
-                    && index + 1 == line_count
-                {
-                    // A compound command has one exit code, not an outcome for each parsed action.
-                    let status = if call.parsed.len() > 1 {
-                        format!(" (command exit {code})")
-                    } else {
-                        format!(" (exit {code})")
-                    };
-                    // Search exit 1 can mean no matches; report the code without calling it a failure.
-                    line.push(
-                        if code == 1
-                            && call
-                                .parsed
-                                .iter()
-                                .any(|p| matches!(p, ParsedCommand::Search { .. }))
-                        {
-                            status.dim()
-                        } else {
-                            status.red()
-                        },
-                    );
-                }
-                let line = Line::from(line);
-                let initial_indent = Line::from(vec![title.fg(accent_color()), " ".into()]);
-                let subsequent_indent = " ".repeat(initial_indent.width()).into();
-                let wrapped = adaptive_wrap_hyperlink_lines(
-                    &[line.into()],
-                    RtOptions::new(width as usize)
-                        .initial_indent(initial_indent)
-                        .subsequent_indent(subsequent_indent),
-                );
-                out_indented.extend(wrapped);
+            // Search exit 1 usually means "no matches", so it is reported without alarm.
+            let benign = exit_code == Some(1)
+                && call
+                    .parsed
+                    .iter()
+                    .any(|p| matches!(p, ParsedCommand::Search { .. }));
+            let marker = if let Some(running) = group.iter().find(|call| call.duration.is_none()) {
+                activity_marker(running.start_time, self.animations_enabled())
+            } else if exit_code.is_some() && !benign {
+                concise::MARKER.red().bold()
+            } else {
+                concise::MARKER.green().bold()
+            };
+            let mut spans = vec![marker, " ".into()];
+            spans.extend(label);
+            if let Some(code) = exit_code {
+                spans.push(concise::exit_suffix(code, benign));
             }
+            let failed = exit_code.is_some() && !benign;
+            out.push((clipped_line(Line::from(spans), width), failed));
         }
-
-        out.extend(prefix_hyperlink_lines(
-            out_indented,
-            "  └ ".dim(),
-            "    ".into(),
-        ));
         out
     }
 
@@ -505,12 +441,15 @@ impl ExecCell {
             panic!("Expected exactly one call in a command display cell");
         };
         let layout = EXEC_DISPLAY_LAYOUT;
+        if !call.is_unified_exec_interaction() && !call.is_user_shell_command() {
+            return self.concise_command_display(call, width);
+        }
         let success = call
             .duration
             .and_then(|_| call.output.as_ref().map(|o| o.exit_code == 0));
         let bullet = match success {
-            Some(true) => "•".green().bold(),
-            Some(false) => "•".red().bold(),
+            Some(true) => concise::MARKER.green().bold(),
+            Some(false) => concise::MARKER.red().bold(),
             None => activity_marker(call.start_time, self.animations_enabled()),
         };
         let is_interaction = call.is_unified_exec_interaction();
@@ -677,6 +616,60 @@ impl ExecCell {
             }
         }
 
+        CommandDisplay {
+            lines,
+            hidden_details,
+        }
+    }
+
+    /// Agent commands as one `⏺ Bash(cmd)` / `⏺ Update(file)` row plus a folded output preview.
+    fn concise_command_display(&self, call: &ExecCall, width: u16) -> CommandDisplay {
+        let layout = EXEC_DISPLAY_LAYOUT;
+        let finished = call.duration.and(call.output.as_ref());
+        let failed_code = finished
+            .map(|output| output.exit_code)
+            .filter(|code| *code != 0);
+        let marker = match (finished, failed_code) {
+            (None, _) => activity_marker(call.start_time, self.animations_enabled()),
+            (Some(_), Some(_)) => concise::MARKER.red().bold(),
+            (Some(_), None) => concise::MARKER.green().bold(),
+        };
+        let (label, is_update) = concise::command_label(&call.command);
+        let mut header = Line::from(vec![marker, " ".into()]);
+        header.spans.extend(label);
+        if let Some(code) = failed_code {
+            header.push_span(concise::exit_suffix(code, /*benign*/ false));
+        }
+        let mut hidden_details = header.width() > usize::from(width)
+            || strip_bash_lc_and_escape(&call.command)
+                .lines()
+                .nth(1)
+                .is_some();
+        let mut lines = vec![clipped_line(header, width)];
+
+        // A successful edit's output is noise; a failed one explains the failure.
+        let show_output = !is_update || failed_code.is_some();
+        if let Some(output) = call.output.as_ref().filter(|_| show_output) {
+            let preview = output_preview_lines(output, layout.output_block.wrap_width(width));
+            let preview = if preview.is_empty() {
+                vec![Line::from("(no output)".dim()).into()]
+            } else {
+                preview
+            };
+            // Only the omission hint lacks source provenance; visible output rows retain it.
+            hidden_details |=
+                preview.iter().any(|line| line.source.is_none()) && output.line_counts().0 > 0;
+            lines.extend(prefix_hyperlink_lines(
+                preview,
+                Span::from(layout.output_block.initial_prefix).dim(),
+                Span::from(layout.output_block.subsequent_prefix),
+            ));
+        } else if call.output.is_some() {
+            hidden_details |= call
+                .output
+                .as_ref()
+                .is_some_and(|output| output.line_counts().0 > 0);
+        }
         CommandDisplay {
             lines,
             hidden_details,
@@ -881,7 +874,7 @@ impl ExecDisplayLayout {
 const EXEC_DISPLAY_LAYOUT: ExecDisplayLayout = ExecDisplayLayout::new(
     PrefixedBlock::new("  │ ", "  │ "),
     /*command_continuation_max_lines*/ 2,
-    PrefixedBlock::new("  └ ", "    "),
+    PrefixedBlock::new(concise::OUTPUT_FIRST_PREFIX, concise::OUTPUT_REST_PREFIX),
 );
 
 #[cfg(test)]
@@ -1028,7 +1021,7 @@ mod tests {
         assert!(
             rendered
                 .iter()
-                .any(|line| line.contains("… +6 lines (⌃t to view transcript)")),
+                .any(|line| line.contains("… +6 lines (⌃t to expand)")),
             "expected omitted hint to count hidden lines (not wrapped rows), got: {rendered:?}"
         );
     }
@@ -1056,7 +1049,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            vec!["1", "2", "… +3 lines (⌃t to view transcript)", "6", "7",]
+            vec!["1", "2", "… +3 lines (⌃t to expand)", "6", "7",]
         );
     }
 
@@ -1175,10 +1168,7 @@ mod tests {
             .map(render_line_text)
             .join("\n");
 
-        insta::assert_snapshot!(rendered, @r"
-        • Exploring
-          └ Read SKILL.md
-        ");
+        insta::assert_snapshot!(rendered, @r##"⏺ Read(SKILL.md)"##);
     }
 
     #[test]
@@ -1283,11 +1273,11 @@ mod tests {
             .collect();
 
         assert_eq!(first, second);
-        assert_eq!(first, vec!["• Running echo done".to_string()]);
+        assert_eq!(first, vec!["⏺ Bash(echo done)".to_string()]);
     }
 
     #[test]
-    fn exploring_display_does_not_split_long_url_like_search_query() {
+    fn exploring_display_clips_long_url_like_search_query_to_one_row() {
         let url_like = "example.test/api/v1/projects/alpha-team/releases/2026-02-17/builds/1234567890/artifacts/reports/performance/summary/detail/with/a/very/long/path";
         let call = ExecCall {
             call_id: "call-id".to_string(),
@@ -1316,13 +1306,11 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(
-            rendered
-                .iter()
-                .filter(|line| line.contains(url_like))
-                .count(),
-            1,
-            "expected full URL-like query in one rendered line, got: {rendered:?}"
+        // Rows are clipped, never wrapped: the query stays on one row and the transcript has it all.
+        assert_eq!(rendered.len(), 1, "{rendered:?}");
+        assert!(
+            rendered[0].starts_with("⏺ Search(\"example.test/api/") && rendered[0].ends_with('…'),
+            "{rendered:?}"
         );
     }
 

@@ -62,7 +62,10 @@ fn python_written_paths(script: &str) -> Option<Vec<String>> {
             continue;
         }
         // A write through a variable we can't resolve to a literal path makes the target unknown.
-        let (_, path) = bindings.iter().rev().find(|(name, _)| *name == var.as_str())?;
+        let (_, path) = bindings
+            .iter()
+            .rev()
+            .find(|(name, _)| *name == var.as_str())?;
         writes.push((var.start(), (*path).to_string()));
     }
     for re in [&*INLINE_PATH_WRITE, &*OPEN_WRITE] {
@@ -174,7 +177,10 @@ mod tests {
     #[test]
     fn python_two_files_dedup() {
         let script = "python3 - <<'PY'\nfrom pathlib import Path\nh = Path('index.html')\nc = Path(\"styles.css\")\nh.write_text('1')\nc.write_text('2')\nh.write_text('3')\nPY";
-        assert_eq!(edited_paths(&sh(script)), some(&["index.html", "styles.css"]));
+        assert_eq!(
+            edited_paths(&sh(script)),
+            some(&["index.html", "styles.css"])
+        );
     }
 
     #[test]
@@ -208,7 +214,8 @@ mod tests {
 
     #[test]
     fn python_non_literal_path() {
-        let script = "python3 - <<'PY'\nfrom pathlib import Path\np = Path(name)\np.write_text('x')\nPY";
+        let script =
+            "python3 - <<'PY'\nfrom pathlib import Path\np = Path(name)\np.write_text('x')\nPY";
         assert_eq!(edited_paths(&sh(script)), None);
     }
 

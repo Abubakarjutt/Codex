@@ -1,11 +1,11 @@
 ---
-source: tui/src/chatwidget/tests.rs
+source: tui/src/chatwidget/tests/exec_flow.rs
+assertion_line: 800
 expression: snapshot
 ---
 History:
-• Ran echo repro-marker
-  └ repro-marker
+⏺ Bash(echo repro-marker)
+  ⎿  repro-marker
 
 Active:
-• Exploring
-  └ Read null
+• Read(null)

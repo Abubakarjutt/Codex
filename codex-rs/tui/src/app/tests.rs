@@ -5225,7 +5225,7 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     }
     keys!(prefix, side);
     let running = side_frame(&mut app, &mut tui, size)?;
-    assert!(running.contains("Running echo sidebar-check"), "{running}");
+    assert!(running.contains("Bash(echo sidebar-check)"), "{running}");
     app.enqueue_thread_notification(
         parent,
         agent_message_delta_notification(parent, turn, "after-command", "Command finished."),
@@ -5247,7 +5247,7 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     .await?;
     let finished = side_frame(&mut app, &mut tui, size)?;
     let (_, after_command) = finished
-        .split_once("Ran echo sidebar-check")
+        .split_once("Bash(echo sidebar-check)")
         .unwrap_or_else(|| panic!("{finished}"));
     assert!(after_command.contains("Command finished."), "{finished}");
     assert_eq!(
