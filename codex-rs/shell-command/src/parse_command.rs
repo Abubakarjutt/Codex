@@ -943,6 +943,86 @@ mod tests {
         );
     }
 
+    /// Names read by a bash -lc script, or None if anything parsed as non-Read.
+    fn read_names(inner: &str) -> Option<std::collections::BTreeSet<String>> {
+        parse_command(&vec_str(&["bash", "-lc", inner]))
+            .into_iter()
+            .map(|p| match p {
+                ParsedCommand::Read { name, .. } => Some(name),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn has_unknown(inner: &str) -> bool {
+        parse_command(&vec_str(&["bash", "-lc", inner]))
+            .iter()
+            .any(|p| matches!(p, ParsedCommand::Unknown { .. }))
+    }
+
+    fn names(list: &[&str]) -> Option<std::collections::BTreeSet<String>> {
+        Some(list.iter().map(ToString::to_string).collect())
+    }
+
+    #[test]
+    fn concise_pwd_prefix_is_dropped() {
+        assert_eq!(
+            read_names("pwd && sed -n '1,80p' README.md"),
+            names(&["README.md"])
+        );
+    }
+
+    #[test]
+    fn concise_printf_percent_s_separators() {
+        let s = "printf '%s\\n' '--- index.html ---' && sed -n '1,240p' index.html && printf '%s\\n' '--- script.js ---' && sed -n '1,200p' script.js";
+        assert_eq!(read_names(s), names(&["index.html", "script.js"]));
+    }
+
+    #[test]
+    fn concise_sed_then_tail_same_file() {
+        let s = "sed -n '1,70p' styles.css && printf '\\n--- CSS ending ---\\n' && tail -40 styles.css";
+        assert_eq!(read_names(s), names(&["styles.css"]));
+    }
+
+    #[test]
+    fn concise_if_exists_then_read() {
+        let s = "if [ -e AGENTS.md ]; then sed -n '1,240p' AGENTS.md; fi";
+        assert_eq!(read_names(s), names(&["AGENTS.md"]));
+    }
+
+    #[test]
+    fn concise_for_loop_over_literal_files() {
+        let s = "for f in docs/a.md docs/b.md; do printf '\\n--- %s ---\\n' \"$f\"; sed -n '1,80p' \"$f\"; done";
+        assert_eq!(read_names(s), names(&["a.md", "b.md"]));
+    }
+
+    #[test]
+    fn concise_find_with_grouping_is_not_unknown() {
+        assert!(!has_unknown(
+            "find src -type f \\( -name '*.md' -o -name '*.txt' \\) -not -path '*/node_modules/*'"
+        ));
+    }
+
+    #[test]
+    fn concise_pwd_does_not_hide_rm() {
+        assert!(has_unknown("pwd && rm -rf build"));
+    }
+
+    #[test]
+    fn concise_printf_redirect_is_not_dropped() {
+        assert!(has_unknown("printf 'x' > out.txt && cat out.txt"));
+    }
+
+    #[test]
+    fn concise_for_loop_with_write_is_unknown() {
+        assert!(has_unknown("for f in a b; do echo hi > \"$f\"; done"));
+    }
+
+    #[test]
+    fn concise_http_server_stays_unknown() {
+        assert!(has_unknown("python3 -m http.server 8000"));
+    }
+
     #[test]
     fn drops_yes_in_pipelines() {
         // Inside bash -lc, `yes | rg --files` should focus on the primary command.
@@ -1993,8 +2073,163 @@ fn parse_shell_lc_commands(original: &[String]) -> Option<Vec<ParsedCommand>> {
     Some(parse_shell_script(script))
 }
 
+/// Display-only rewrite of simple control flow so summaries can see the commands inside:
+/// `if [ … ]; then BODY; fi` → `BODY`, `for v in a b; do BODY; done` → `BODY[v=a]; BODY[v=b]`,
+/// and find's `\(` / `\)` grouping words are dropped. The rewritten script is still parsed by
+/// the strict word-only checker, so redirections and substitutions keep it Unknown.
+/// Never used for approvals (`exec_policy` uses `bash::parse_shell_lc_plain_commands`).
+fn desugar_for_display(script: &str) -> Option<String> {
+    let tree = try_parse_shell(script)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return None;
+    }
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    collect_desugar_edits(root, script, &mut edits)?;
+    if edits.is_empty() {
+        return None;
+    }
+    edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+    let mut out = script.to_string();
+    for (start, end, text) in edits {
+        out.replace_range(start..end, &text);
+    }
+    Some(out)
+}
+
+fn collect_desugar_edits(
+    node: tree_sitter::Node,
+    src: &str,
+    edits: &mut Vec<(usize, usize, String)>,
+) -> Option<()> {
+    let text = node.utf8_text(src.as_bytes()).ok()?;
+    match node.kind() {
+        "if_statement" => {
+            edits.push((node.start_byte(), node.end_byte(), desugar_if(node, src)?));
+            return Some(());
+        }
+        "for_statement" => {
+            edits.push((node.start_byte(), node.end_byte(), desugar_for(node, src)?));
+            return Some(());
+        }
+        "word" if text == "\\(" || text == "\\)" => {
+            edits.push((node.start_byte(), node.end_byte(), String::new()));
+            return Some(());
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_desugar_edits(child, src, edits)?;
+    }
+    Some(())
+}
+
+/// Source text spanning the named children strictly between the `open` and `close` keywords.
+fn body_between(node: tree_sitter::Node, src: &str, open: &str, close: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    let mut inside = false;
+    let (mut start, mut end) = (None, None);
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            k if k == open => inside = true,
+            k if k == close => break,
+            _ if inside && child.is_named() && child.kind() != "comment" => {
+                start.get_or_insert(child.start_byte());
+                end = Some(child.end_byte());
+            }
+            _ => {}
+        }
+    }
+    src.get(start?..end?).map(str::to_string)
+}
+
+fn desugar_if(node: tree_sitter::Node, src: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    let mut conditions = Vec::new();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "elif_clause" | "else_clause" => return None,
+            "then" => break,
+            _ if child.is_named() => conditions.push(child),
+            _ => {}
+        }
+    }
+    let [condition] = conditions.as_slice() else {
+        return None;
+    };
+    let condition_text = condition.utf8_text(src.as_bytes()).ok()?;
+    if condition.kind() != "test_command" || condition_text.contains(['$', '`']) {
+        return None;
+    }
+    body_between(node, src, "then", "fi")
+}
+
+fn desugar_for(node: tree_sitter::Node, src: &str) -> Option<String> {
+    let variable = node
+        .child_by_field_name("variable")?
+        .utf8_text(src.as_bytes())
+        .ok()?;
+    let mut cursor = node.walk();
+    let values: Vec<&str> = node
+        .children_by_field_name("value", &mut cursor)
+        .map(|value| {
+            let text = value.utf8_text(src.as_bytes()).ok()?;
+            let literal = value.kind() == "word"
+                && text
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._/-+@%:,=".contains(c));
+            literal.then_some(text)
+        })
+        .collect::<Option<_>>()?;
+    if values.is_empty() {
+        return None;
+    }
+    let body = body_between(node.child_by_field_name("body")?, src, "do", "done")?;
+    let expanded: Vec<String> = values
+        .iter()
+        .map(|value| substitute_shell_var(&body, variable, value))
+        .collect();
+    Some(expanded.join("; "))
+}
+
+/// Replaces `"$v"`, `"${v}"`, `${v}` and `$v` (not followed by a name character) with `value`.
+fn substitute_shell_var(body: &str, variable: &str, value: &str) -> String {
+    let mut out = body
+        .replace(&format!("\"${{{variable}}}\""), value)
+        .replace(&format!("\"${variable}\""), value)
+        .replace(&format!("${{{variable}}}"), value);
+    let needle = format!("${variable}");
+    let mut result = String::with_capacity(out.len());
+    while let Some(idx) = out.find(&needle) {
+        let after = &out[idx + needle.len()..];
+        let continues_name = after
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        result.push_str(&out[..idx]);
+        if continues_name {
+            result.push_str(&needle);
+        } else {
+            result.push_str(value);
+        }
+        out = after.to_string();
+    }
+    result.push_str(&out);
+    result
+}
+
 /// Parses command metadata from a Bash-compatible shell script.
 pub fn parse_shell_script(script: &str) -> Vec<ParsedCommand> {
+    if let Some(desugared) = desugar_for_display(script) {
+        let parsed = parse_shell_script(&desugared);
+        if !parsed
+            .iter()
+            .any(|p| matches!(p, ParsedCommand::Unknown { .. }))
+        {
+            return parsed;
+        }
+    }
     if let Some(tree) = try_parse_shell(script)
         && let Some(all_commands) = try_parse_word_only_commands_sequence(&tree, script)
         && !all_commands.is_empty()
@@ -2046,7 +2281,9 @@ pub fn parse_shell_script(script: &str) -> Vec<ParsedCommand> {
         }
 
         if commands.len() > 1 {
-            commands.retain(|pc| !matches!(pc, ParsedCommand::Unknown { cmd } if cmd == "true"));
+            commands.retain(
+                |pc| !matches!(pc, ParsedCommand::Unknown { cmd } if cmd == "true" || cmd == "pwd"),
+            );
             // Apply the same simplifications used for non-bash parsing, e.g., drop leading `cd`.
             while let Some(next) = simplify_once(&commands) {
                 commands = next;
@@ -2632,6 +2869,10 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
                     let s = v.strip_prefix('+').unwrap_or(v);
                     !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
                 }
+                // Legacy `tail -40 file` form.
+                Some((first, _)) if first.len() > 1 && first.starts_with('-') => {
+                    first[1..].chars().all(|c| c.is_ascii_digit())
+                }
                 _ => false,
             };
             if has_valid_n {
@@ -2764,3 +3005,4 @@ fn join_paths(base: &str, rel: &str) -> String {
     buf.push(rel);
     buf.to_string_lossy().to_string()
 }
+
