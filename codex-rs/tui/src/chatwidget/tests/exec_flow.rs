@@ -120,7 +120,7 @@ async fn replayed_command_completion_preserves_tracking_without_duplicate_starts
         .collect::<Vec<_>>();
     assert_eq!(
         history,
-        vec!["• Ran cat replay\n  └ (no output)\n".to_string()]
+        vec!["⏺ Bash(cat replay)\n  ⎿  (no output)\n".to_string()]
     );
 }
 
@@ -159,7 +159,7 @@ async fn replayed_completion_preserves_unrelated_running_command() {
         assert!(active_blob(&chat).contains(if active_mcp {
             "Calling"
         } else {
-            "Running sleep 5"
+            "Bash(sleep 5)"
         }));
     }
 }
@@ -188,19 +188,17 @@ async fn failed_exploration_keeps_overlapping_commands_active_until_all_finish()
     end_exec(&mut chat, followup, "followup\n", "", /*exit_code*/ 0);
 
     assert!(drain_insert_history(&mut rx).is_empty());
-    insta::assert_snapshot!(active_blob(&chat), @r"
-• Explored
-  └ List missing (exit 1)
-    Read foo.txt, bar.txt
-");
+    insta::assert_snapshot!(active_blob(&chat), @r##"
+⏺ List(missing) · exit 1
+⏺ Read 2 files
+"##);
 
     let later = begin_exec(&mut chat, "call-after-failure", "cat later.txt");
     end_exec(&mut chat, later, "later\n", "", /*exit_code*/ 0);
-    insta::assert_snapshot!(active_blob(&chat), @r"
-• Explored
-  └ List missing (exit 1)
-    Read foo.txt, bar.txt, later.txt
-");
+    insta::assert_snapshot!(active_blob(&chat), @r##"
+⏺ List(missing) · exit 1
+⏺ Read 3 files
+"##);
 }
 
 #[tokio::test]
@@ -238,18 +236,16 @@ async fn exploration_nonzero_exits_remain_visible_beside_successful_reads() {
         .display_lines(/*width*/ 80)
         .into_iter()
         .flat_map(|line| line.spans)
-        .filter(|span| {
-            span.content.starts_with(" (exit") || span.content.starts_with(" (command exit")
-        })
+        .filter(|span| span.content.starts_with(" · exit"))
         .map(|span| (span.content.into_owned(), span.style.fg))
         .collect::<Vec<_>>();
     assert_eq!(
         statuses,
         vec![
-            (" (exit 1)".to_string(), Some(ratatui::style::Color::Red)),
-            (" (exit 1)".to_string(), None),
-            (" (exit 2)".to_string(), Some(ratatui::style::Color::Red)),
-            (" (command exit 1)".to_string(), None),
+            (" · exit 1".to_string(), Some(ratatui::style::Color::Red)),
+            (" · exit 1".to_string(), None),
+            (" · exit 2".to_string(), Some(ratatui::style::Color::Red)),
+            (" · exit 1".to_string(), None),
         ]
     );
 }
@@ -534,7 +530,7 @@ async fn exec_history_cell_shows_working_then_completed() {
     let blob = lines_to_single_string(lines);
     // New behavior: no glyph markers; ensure command is shown and no panic.
     assert!(
-        blob.contains("• Ran"),
+        blob.contains("⏺ Bash(echo done)"),
         "expected summary header present: {blob:?}"
     );
     assert!(
@@ -561,7 +557,7 @@ async fn exec_history_cell_shows_working_then_failed() {
     let lines = &cells[0];
     let blob = lines_to_single_string(lines);
     assert!(
-        blob.contains("• Ran false"),
+        blob.contains("⏺ Bash(false) · exit 2"),
         "expected command and header text present: {blob:?}"
     );
     assert!(blob.to_lowercase().contains("bloop"), "expected error text");
@@ -604,7 +600,7 @@ async fn exec_end_without_begin_uses_event_command() {
     assert_eq!(cells.len(), 1, "expected finalized exec cell to flush");
     let blob = lines_to_single_string(&cells[0]);
     assert!(
-        blob.contains("• Ran echo orphaned"),
+        blob.contains("⏺ Bash(echo orphaned)"),
         "expected command text to come from event: {blob:?}"
     );
     assert!(
@@ -620,7 +616,7 @@ async fn exec_end_without_begin_does_not_flush_unrelated_running_exploring_cell(
 
     begin_exec(&mut chat, "call-exploring", "cat /dev/null");
     assert!(drain_insert_history(&mut rx).is_empty());
-    assert!(active_blob(&chat).contains("Read null"));
+    assert!(active_blob(&chat).contains("Read(null)"));
 
     let orphan =
         begin_unified_exec_startup(&mut chat, "call-orphan", "proc-1", "echo repro-marker");
@@ -638,16 +634,17 @@ async fn exec_end_without_begin_does_not_flush_unrelated_running_exploring_cell(
     assert_eq!(cells.len(), 1, "only the orphan end should be inserted");
     let orphan_blob = lines_to_single_string(&cells[0]);
     assert!(
-        orphan_blob.contains("• Ran echo repro-marker"),
+        orphan_blob.contains("⏺ Bash(echo repro-marker)"),
         "expected orphan end to render a standalone entry: {orphan_blob:?}"
     );
     let active = active_blob(&chat);
+    // A running row carries the activity indicator; only finished rows get ⏺.
     assert!(
-        active.contains("• Exploring"),
+        active.contains("Read(null)") && !active.contains("⏺ Read(null)"),
         "expected unrelated exploring call to remain active: {active:?}"
     );
     assert!(
-        active.contains("Read null"),
+        active.contains("Read(null)"),
         "expected active exploring command to remain visible: {active:?}"
     );
     assert!(
@@ -678,15 +675,15 @@ async fn exec_end_without_begin_flushes_completed_unrelated_exploring_cell() {
     let first = lines_to_single_string(&cells[0]);
     let second = lines_to_single_string(&cells[1]);
     assert!(
-        first.contains("• Explored"),
+        first.contains("⏺ List(ls -la)"),
         "expected flushed exploring cell: {first:?}"
     );
     assert!(
-        first.contains("List ls -la"),
+        first.contains("List(ls -la)"),
         "expected flushed exploring cell: {first:?}"
     );
     assert!(
-        second.contains("• Ran echo after"),
+        second.contains("⏺ Bash(echo after)"),
         "expected orphan end entry after flush: {second:?}"
     );
     assert!(
@@ -712,16 +709,16 @@ async fn overlapping_exploring_exec_end_is_not_misclassified_as_orphan() {
     );
     let active = active_blob(&chat);
     assert!(
-        active.contains("List ls -la"),
+        active.contains("List(ls -la)"),
         "expected first command still grouped: {active:?}"
     );
     assert!(
-        active.contains("Read foo.txt"),
+        active.contains("Read(foo.txt)"),
         "expected second running command to stay in the same active cell: {active:?}"
     );
     assert!(
-        active.contains("• Exploring"),
-        "expected grouped exploring header to remain active: {active:?}"
+        !active.contains("⏺ Read(foo.txt)"),
+        "expected grouped exploring row to remain active: {active:?}"
     );
 
     end_exec(&mut chat, begin_cat, "hello\n", "", /*exit_code*/ 0);
@@ -755,7 +752,7 @@ async fn exec_history_shows_unified_exec_startup_commands() {
     assert_eq!(cells.len(), 1, "expected finalized exec cell to flush");
     let blob = lines_to_single_string(&cells[0]);
     assert!(
-        blob.contains("• Ran echo unified exec startup"),
+        blob.contains("⏺ Bash(echo unified exec startup)"),
         "expected startup command to render: {blob:?}"
     );
 }
@@ -774,7 +771,7 @@ async fn exec_history_shows_unified_exec_tool_calls() {
     end_exec(&mut chat, begin, "", "", /*exit_code*/ 0);
 
     let blob = active_blob(&chat);
-    assert_eq!(blob, "• Explored\n  └ List ls\n");
+    assert_eq!(blob, "⏺ List(ls)\n");
 }
 
 #[tokio::test]

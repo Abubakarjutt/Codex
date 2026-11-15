@@ -217,13 +217,13 @@ fn code_mode_output_shares_a_row_budget_across_blocks() {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    insta::assert_snapshot!(display, @"
-    • Inspect page
-      └ Page title
-        Navigation
-        Main content
-        +3 lines (⌃t to view transcript)
-    ");
+    insta::assert_snapshot!(display, @r##"
+• Inspect page
+  └ Page title
+    Navigation
+    Main content
+    … +3 lines (⌃t to expand)
+"##);
     let transcript = cell
         .transcript_lines(/*width*/ 100)
         .iter()
@@ -262,13 +262,13 @@ fn code_mode_output_preserves_trailing_failure_diagnostics_in_transcript() {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    insta::assert_snapshot!(display, @"
-    • Inspect page
-      └ Script failed
-        Page title
-        Navigation
-        +6 lines (⌃t to view transcript)
-    ");
+    insta::assert_snapshot!(display, @r##"
+• Inspect page
+  └ Script failed
+    Page title
+    Navigation
+    … +6 lines (⌃t to expand)
+"##);
     let transcript = cell
         .transcript_lines(/*width*/ 80)
         .iter()
@@ -322,7 +322,7 @@ fn code_mode_output_row_budget_applies_after_wrapping_and_to_errors() {
                         .iter()
                         .all(|line| line.width() <= usize::from(width))
                 );
-                assert!(display.last().unwrap().to_string().starts_with("    +"));
+                assert!(display.last().unwrap().to_string().starts_with("    … +"));
                 let transcript = cell
                     .transcript_lines(width)
                     .iter()

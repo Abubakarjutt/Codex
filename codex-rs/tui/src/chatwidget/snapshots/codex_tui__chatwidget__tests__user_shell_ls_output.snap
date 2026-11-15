@@ -1,7 +1,8 @@
 ---
-source: tui/src/chatwidget/tests.rs
+source: tui/src/chatwidget/tests/exec_flow.rs
+assertion_line: 1260
 expression: blob
 ---
-• You ran ls
-  └ file1
-    file2
+⏺ You ran ls
+  ⎿  file1
+     file2

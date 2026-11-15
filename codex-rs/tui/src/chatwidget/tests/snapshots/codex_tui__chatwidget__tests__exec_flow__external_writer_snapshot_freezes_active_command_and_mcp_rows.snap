@@ -1,8 +1,9 @@
 ---
 source: tui/src/chatwidget/tests/exec_flow.rs
+assertion_line: 47
 expression: "rendered.join(\"\\n---\\n\")"
 ---
-• Running sleep 5
+⏺ Bash(sleep 5)
 
 ---
 • Calling server.tool()

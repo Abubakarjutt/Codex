@@ -116,7 +116,7 @@ impl ToolOutputPreview {
             let unit = if omitted == 1 { "line" } else { "lines" };
             self.lines.push(
                 truncate_line_with_ellipsis_if_overflow(
-                    format!("+{omitted} {unit} ({})", transcript_hint())
+                    format!("… +{omitted} {unit} ({})", transcript_hint())
                         .dim()
                         .into(),
                     self.width,

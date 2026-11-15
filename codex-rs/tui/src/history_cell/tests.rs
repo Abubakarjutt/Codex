@@ -1540,23 +1540,23 @@ fn code_mode_tool_call_uses_title_and_preserves_full_transcript() {
 
     let history = render_lines(&cell.display_lines(/*width*/ 40)).join("\n");
     let transcript = render_lines(&cell.transcript_lines(/*width*/ 180)).join("\n");
-    insta::assert_snapshot!(format!("history:\n{history}\n\ntranscript:\n{transcript}"), @r#"
-    history:
-    • Inspect Spotify workspace
-      └ 012345678901234567890123456789012345
-        678901234567890123456789012345678901
-        234567890123456789012345678901234567
-        +1 line (⌃t to view transcript)
+    insta::assert_snapshot!(format!("history:\n{history}\n\ntranscript:\n{transcript}"), @r##"
+history:
+• Inspect Spotify workspace
+  └ 012345678901234567890123456789012345
+    678901234567890123456789012345678901
+    234567890123456789012345678901234567
+    … +1 line (⌃t to expand)
 
-    transcript:
-    • Called node_repl.js({"title":"Inspect Spotify workspace","code":"await tools.exec_command({ cmd: 'git status' })"})
-      └ Script completed
-        Wall time 0.1 seconds
-        Output:
-        {"chunk_id":"chunk-
-            1","output":"012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678
-            90123456789012345678901234567890123456789 transcript tail","exit_code":0}
-    "#);
+transcript:
+• Called node_repl.js({"title":"Inspect Spotify workspace","code":"await tools.exec_command({ cmd: 'git status' })"})
+  └ Script completed
+    Wall time 0.1 seconds
+    Output:
+    {"chunk_id":"chunk-
+        1","output":"012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678
+        90123456789012345678901234567890123456789 transcript tail","exit_code":0}
+"##);
 }
 
 #[test]
@@ -2129,6 +2129,141 @@ fn multiline_command_wraps_with_extra_indent_on_subsequent_lines() {
     let lines = cell.display_lines(width);
     let rendered = render_lines(&lines).join("\n");
     insta::assert_snapshot!(rendered);
+}
+
+const CONCISE_EDIT_SCRIPT: &str = "python3 - <<'PY'\nfrom pathlib import Path\np = Path('index.html')\ns = p.read_text()\np.write_text(s.replace('a','b',1))\nPY";
+
+fn concise_call(call_id: &str, command: Vec<String>, parsed: Vec<ParsedCommand>) -> ExecCall {
+    ExecCall {
+        call_id: call_id.to_string(),
+        command,
+        parsed,
+        output: None,
+        source: ExecCommandSource::Agent,
+        start_time: Some(Instant::now()),
+        duration: None,
+        interaction_input: None,
+    }
+}
+
+fn concise_read(name: &str) -> Vec<ParsedCommand> {
+    vec![ParsedCommand::Read {
+        cmd: format!("cat {name}"),
+        name: name.to_string(),
+        path: PathBuf::from(name),
+    }]
+}
+
+fn concise_sh(script: &str) -> Vec<String> {
+    vec!["bash".into(), "-lc".into(), script.into()]
+}
+
+fn concise_render(cell: &ExecCell, width: u16) -> Vec<String> {
+    render_lines(&cell.display_lines(width))
+}
+
+#[test]
+fn concise_single_read() {
+    let mut cell = ExecCell::new(
+        concise_call("c1", concise_sh("cat README.md"), concise_read("README.md")),
+        /*animations_enabled*/ false,
+    );
+    cell.complete_call("c1", CommandOutput::default(), Duration::from_millis(1));
+    assert_eq!(concise_render(&cell, 80), vec!["⏺ Read(README.md)"]);
+}
+
+#[test]
+fn concise_three_reads_grouped() {
+    let mut cell = ExecCell::new(
+        concise_call("c1", concise_sh("cat a.rs"), concise_read("a.rs")),
+        /*animations_enabled*/ false,
+    );
+    for (id, name) in [("c2", "b.rs"), ("c3", "c.rs")] {
+        assert!(cell.add_call(
+            id.to_string(),
+            concise_sh(&format!("cat {name}")),
+            concise_read(name),
+            ExecCommandSource::Agent,
+            None,
+        ));
+    }
+    for id in ["c1", "c2", "c3"] {
+        cell.complete_call(id, CommandOutput::default(), Duration::from_millis(1));
+    }
+    assert_eq!(concise_render(&cell, 80), vec!["⏺ Read 3 files"]);
+}
+
+#[test]
+fn concise_python_edit_is_update() {
+    let mut cell = ExecCell::new(
+        concise_call(
+            "c1",
+            concise_sh(CONCISE_EDIT_SCRIPT),
+            vec![ParsedCommand::Unknown {
+                cmd: CONCISE_EDIT_SCRIPT.to_string(),
+            }],
+        ),
+        /*animations_enabled*/ false,
+    );
+    cell.complete_call("c1", CommandOutput::default(), Duration::from_millis(1));
+    assert_eq!(concise_render(&cell, 80), vec!["⏺ Update(index.html)"]);
+}
+
+#[test]
+fn concise_bash_folds_output() {
+    let mut cell = ExecCell::new(
+        concise_call("c1", concise_sh("npm test"), Vec::new()),
+        /*animations_enabled*/ false,
+    );
+    let output = (1..=10)
+        .map(|i| format!("l{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    cell.complete_call(
+        "c1",
+        CommandOutput::new(0, output),
+        Duration::from_millis(1),
+    );
+    assert_eq!(
+        concise_render(&cell, 80),
+        vec![
+            "⏺ Bash(npm test)",
+            "  ⎿  l1",
+            "     l2",
+            "     l3",
+            "     … +7 lines (⌃t to expand)",
+        ]
+    );
+}
+
+#[test]
+fn concise_failed_update_shows_exit() {
+    let mut cell = ExecCell::new(
+        concise_call("c1", concise_sh(CONCISE_EDIT_SCRIPT), Vec::new()),
+        /*animations_enabled*/ false,
+    );
+    cell.complete_call(
+        "c1",
+        CommandOutput::new(1, "Traceback".to_string()),
+        Duration::from_millis(1),
+    );
+    assert_eq!(
+        concise_render(&cell, 80).first().map(String::as_str),
+        Some("⏺ Update(index.html) · exit 1")
+    );
+}
+
+#[test]
+fn concise_narrow_clips() {
+    let name = "a/very/long/path/to/some_file_name.rs";
+    let mut cell = ExecCell::new(
+        concise_call("c1", concise_sh(&format!("cat {name}")), concise_read(name)),
+        /*animations_enabled*/ false,
+    );
+    cell.complete_call("c1", CommandOutput::default(), Duration::from_millis(1));
+    let rendered = concise_render(&cell, 30);
+    assert_eq!(rendered.len(), 1, "{rendered:?}");
+    assert!(rendered[0].ends_with('…'), "{rendered:?}");
 }
 
 #[test]

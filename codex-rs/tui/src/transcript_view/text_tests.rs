@@ -393,7 +393,14 @@ fn command_and_output_copy_preserve_hard_lines_across_resize() {
     );
     for (name, lines) in rendered {
         let layout = TextLayout::new(lines, /*width*/ 32);
-        assert_eq!(layout.text(), format!("{command}\n{output}"));
+        // The scrollback row is a clipped `Bash(…)` label and copies as shown; the detailed
+        // transcript (ctrl+t) still copies the exact command. Output copies verbatim in both.
+        let header = if name == "compact_command_copy" {
+            "⏺ Bash(printf 'alpha beta gamma…"
+        } else {
+            command
+        };
+        assert_eq!(layout.text(), format!("{header}\n{output}"));
         let narrow = layout.rewrap(/*width*/ 24);
         let wide = narrow.rewrap(/*width*/ 64);
         assert_eq!((narrow.text(), wide.text()), (layout.text(), layout.text()));

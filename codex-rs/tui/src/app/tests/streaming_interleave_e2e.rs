@@ -262,12 +262,13 @@ async fn command_start_before_message_completion_does_not_duplicate_preamble() -
             .collect::<Vec<_>>()
             .join("\n");
         insta::allow_duplicates! {
-            insta::assert_snapshot!(transcript_snapshot, @r"
-            • I’ll inspect the relevant streaming path first.
-            • Ran echo fixture-output
-            • Finished.
-              Worked for [duration] • [completion time]
-            ");
+            insta::assert_snapshot!(transcript_snapshot, @r##"
+
+• I’ll inspect the relevant streaming path first.
+⏺ Bash(echo fixture-output)
+• Finished.
+  Worked for [duration] • [completion time]
+"##);
         }
     }
 

@@ -1,9 +1,10 @@
 ---
 source: tui/src/chatwidget/tests/exec_flow.rs
+assertion_line: 933
 expression: combined
 ---
-• Ran echo preparing
-  └ preparing
+⏺ Bash(echo preparing)
+  ⎿  preparing
 
 • Final response.
 

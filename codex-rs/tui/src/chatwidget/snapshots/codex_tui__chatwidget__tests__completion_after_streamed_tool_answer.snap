@@ -1,9 +1,10 @@
 ---
 source: tui/src/chatwidget/tests/completion_styling_tests.rs
+assertion_line: 88
 expression: text
 ---
-• Ran echo ready
-  └ ready
+⏺ Bash(echo ready)
+  ⎿  ready
 
 • The change is ready.
 
