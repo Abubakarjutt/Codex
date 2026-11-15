@@ -772,9 +772,20 @@ impl ChatWidget {
                     Some(format!("{} used", format_tokens_compact(total)))
                 }
             }
-            StatusLineItem::ContextRemaining => self
-                .status_line_context_remaining_percent()
-                .map(|remaining| format!("Context {remaining}% left")),
+            StatusLineItem::ContextRemaining => {
+                let remaining = self.status_line_context_remaining_percent()?;
+                let window = self
+                    .status_line_context_window_size()
+                    .filter(|window| *window > 0);
+                match (self.status_line_context_used_tokens(), window) {
+                    (Some(used), Some(window)) => Some(format!(
+                        "Context {} / {} tokens · {remaining}% left",
+                        format_tokens_compact(used),
+                        format_tokens_compact(window),
+                    )),
+                    _ => Some(format!("Context {remaining}% left")),
+                }
+            }
             StatusLineItem::ContextUsed => self
                 .status_line_context_used_percent()
                 .map(|used| format!("Context {used}% used")),

@@ -74,6 +74,20 @@ async fn token_count_none_resets_context_indicator() {
     assert_eq!(chat.bottom_pane.context_window_percent(), None);
 }
 
+/// The `context-remaining` status-line item shows used and window tokens when the
+/// window is known, since a configured status line replaces the footer context meter.
+#[tokio::test]
+async fn context_remaining_status_item_shows_used_and_window_tokens() {
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    handle_token_count(&mut chat, Some(make_token_info(45_200, 128_000)));
+
+    assert_eq!(
+        chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::ContextRemaining),
+        Some("Context 45.2K / 128K tokens · 71% left".to_string())
+    );
+}
+
 #[tokio::test]
 async fn resumed_session_hides_unknown_token_usage_until_an_update_arrives() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;

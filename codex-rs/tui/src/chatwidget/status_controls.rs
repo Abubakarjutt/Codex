@@ -433,6 +433,20 @@ impl ChatWidget {
         )
     }
 
+    /// Tokens currently occupying the context (the latest prompt size), or `None`
+    /// while a fresh usage report is pending.
+    pub(super) fn status_line_context_used_tokens(&self) -> Option<i64> {
+        if self.token_usage_pending {
+            return None;
+        }
+        Some(
+            self.token_info
+                .as_ref()
+                .map(|info| info.last_token_usage.tokens_in_context_window())
+                .unwrap_or(0),
+        )
+    }
+
     pub(super) fn status_line_context_used_percent(&self) -> Option<i64> {
         self.status_line_context_remaining_percent()
             .map(|remaining| (100 - remaining).clamp(0, 100))
