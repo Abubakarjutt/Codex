@@ -639,7 +639,8 @@ impl ExecCell {
         let mut header = Line::from(vec![marker, " ".into()]);
         header.spans.extend(label);
         let suffix = failed_code.map(|code| concise::exit_suffix(code, /*benign*/ false));
-        let mut hidden_details = header.width() + suffix.as_ref().map_or(0, ratatui::text::Span::width)
+        let mut hidden_details = header.width()
+            + suffix.as_ref().map_or(0, ratatui::text::Span::width)
             > usize::from(width)
             || strip_bash_lc_and_escape(&call.command)
                 .lines()
@@ -1429,7 +1430,11 @@ mod tests {
             1,
         );
         assert_keeps_exit(&cell.display_lines(/*width*/ 40)[0], 40, 1);
-        assert_keeps_exit(&visible_lines(cell.compact_hyperlink_lines(/*width*/ 40))[0], 40, 1);
+        assert_keeps_exit(
+            &visible_lines(cell.compact_hyperlink_lines(/*width*/ 40))[0],
+            40,
+            1,
+        );
     }
 
     #[test]
@@ -1445,7 +1450,18 @@ mod tests {
             2,
         );
         assert_keeps_exit(&cell.display_lines(/*width*/ 40)[0], 40, 2);
-        assert_keeps_exit(&visible_lines(cell.compact_hyperlink_lines(/*width*/ 40))[0], 40, 2);
+        assert_keeps_exit(
+            &visible_lines(cell.compact_hyperlink_lines(/*width*/ 40))[0],
+            40,
+            2,
+        );
+    }
+    #[test]
+    fn exit_suffix_wider_than_terminal_still_fits() {
+        let cell = finished_cell("false", Vec::new(), 1);
+        for width in [4u16, 8, 10] {
+            let line = &cell.display_lines(width)[0];
+            assert!(line.width() <= usize::from(width), "{width}: {line:?}");
+        }
     }
 }
-

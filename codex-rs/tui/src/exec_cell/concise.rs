@@ -78,8 +78,15 @@ pub(super) fn summary_line(
     suffix: Option<Span<'static>>,
     width: u16,
 ) -> HyperlinkLine {
-    let room = usize::from(width).saturating_sub(suffix.as_ref().map_or(0, Span::width));
-    let mut line = truncate_line_with_ellipsis_if_overflow(label, room);
+    let suffix_width = suffix.as_ref().map_or(0, Span::width);
+    if suffix_width >= usize::from(width) {
+        // No room for any label: clip label and suffix together.
+        let mut line = label;
+        line.spans.extend(suffix);
+        return truncate_line_with_ellipsis_if_overflow(line, usize::from(width)).into();
+    }
+    let mut line =
+        truncate_line_with_ellipsis_if_overflow(label, usize::from(width) - suffix_width);
     line.spans.extend(suffix);
     line.into()
 }

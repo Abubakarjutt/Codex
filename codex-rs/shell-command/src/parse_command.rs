@@ -980,7 +980,8 @@ mod tests {
 
     #[test]
     fn concise_sed_then_tail_same_file() {
-        let s = "sed -n '1,70p' styles.css && printf '\\n--- CSS ending ---\\n' && tail -40 styles.css";
+        let s =
+            "sed -n '1,70p' styles.css && printf '\\n--- CSS ending ---\\n' && tail -40 styles.css";
         assert_eq!(read_names(s), names(&["styles.css"]));
     }
 
@@ -1034,7 +1035,10 @@ mod tests {
     // Security review: loop expansion is bounded and not recursive.
     #[test]
     fn concise_for_loop_value_cap() {
-        let values = (0..17).map(|i| format!("f{i}.md")).collect::<Vec<_>>().join(" ");
+        let values = (0..17)
+            .map(|i| format!("f{i}.md"))
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(has_unknown(&format!(
             "for f in {values}; do sed -n '1,5p' \"$f\"; done"
         )));
@@ -2731,8 +2735,10 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
         Some((head, tail)) if head == "find" => {
             // A find that deletes files or runs commands is not a read-only search.
             if tail.iter().any(|arg| {
-                matches!(arg.as_str(), "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir")
-                    || arg.starts_with("-fprint")
+                matches!(
+                    arg.as_str(),
+                    "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir"
+                ) || arg.starts_with("-fprint")
                     || arg.starts_with("-fls")
             }) {
                 return ParsedCommand::Unknown {
@@ -3086,4 +3092,3 @@ fn join_paths(base: &str, rel: &str) -> String {
     buf.push(rel);
     buf.to_string_lossy().to_string()
 }
-

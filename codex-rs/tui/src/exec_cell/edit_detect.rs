@@ -23,10 +23,42 @@ static OPEN_WRITE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"open\(\s*['"]([^'"]+)['"]\s*,\s*['"][wax]b?\+?['"]"#).unwrap()
 });
 
+/// Anything that can act beyond writing the named files: processes, the OS, the network,
+/// dynamic code, or file-system operations other than a write.
+static PY_SIDE_EFFECT: LazyLock<Regex> = LazyLock::new(|| {
+    #[expect(clippy::unwrap_used)]
+    Regex::new(
+        r"\b(?:os|subprocess|shutil|socket|urllib|requests|http|ctypes|pty|multiprocessing|asyncio|importlib)\b|\b(?:exec|eval|compile|__import__|system|popen)\s*\(|\.(?:unlink|rename|replace_file|rmdir|chmod|symlink_to|hardlink_to)\s*\(",
+    )
+    .unwrap()
+});
+static ANY_PATH_WRITE: LazyLock<Regex> = LazyLock::new(|| {
+    #[expect(clippy::unwrap_used)]
+    Regex::new(r"\.write_(?:text|bytes)\(").unwrap()
+});
+static ANY_OPEN_WRITE: LazyLock<Regex> = LazyLock::new(|| {
+    #[expect(clippy::unwrap_used)]
+    Regex::new(r#"open\([^)]*['"][wax]b?\+?['"]"#).unwrap()
+});
+
 /// File paths a command writes, in first-seen order without duplicates, or `None` when the
 /// command is not a recognizable write to literal paths.
 pub(crate) fn edited_paths(command: &[String]) -> Option<Vec<String>> {
+    // PowerShell quoting and subexpressions follow different rules than the POSIX checks below.
+    let program = command
+        .first()?
+        .rsplit(['/', '\\'])
+        .next()?
+        .to_ascii_lowercase();
+    if program.starts_with("pwsh") || program.starts_with("powershell") {
+        return None;
+    }
     let script = strip_bash_lc_and_escape(command);
+    // `$'…'` and `$"…"` quote differently in the shell than in shlex, so the checks below
+    // could disagree with what actually runs.
+    if script.contains("$'") || script.contains("$\"") {
+        return None;
+    }
     let first_word = script.split_whitespace().next()?;
     let paths = if is_python(first_word) {
         python_written_paths(&script)?
@@ -54,7 +86,7 @@ fn python_written_paths(script: &str) -> Option<Vec<String>> {
     // shlex keeps `"…";id` as one word, so shell operators are checked outside quotes too.
     let bare = unquoted(script);
     let lone_c = matches!(shlex::split(script).as_deref(), Some([_, flag, _]) if flag == "-c")
-        && !bare.contains([';', '&', '|', '<', '>', '\n'])
+        && !bare.contains([';', '&', '|', '<', '>', '(', '\n'])
         && !script.contains("$(")
         && !script.contains('`');
     if !lone_c {
@@ -67,6 +99,9 @@ fn python_written_paths(script: &str) -> Option<Vec<String>> {
         if !heredoc_only || !script.contains('\n') {
             return None;
         }
+    }
+    if PY_SIDE_EFFECT.is_match(script) {
+        return None;
     }
     let bindings: Vec<(&str, &str)> = PATH_BINDING
         .captures_iter(script)
@@ -84,6 +119,11 @@ fn python_written_paths(script: &str) -> Option<Vec<String>> {
             .iter()
             .rev()
             .find(|(name, _)| *name == var.as_str())?;
+        // A variable assigned more than once may no longer hold the literal path.
+        let assignment = Regex::new(&format!(r"(?m)^\s*{}\s*=[^=]", var.as_str())).ok()?;
+        if assignment.find_iter(script).count() != 1 {
+            return None;
+        }
         writes.push((var.start(), (*path).to_string()));
     }
     for re in [&*INLINE_PATH_WRITE, &*OPEN_WRITE] {
@@ -91,6 +131,11 @@ fn python_written_paths(script: &str) -> Option<Vec<String>> {
             let m = c.get(1)?;
             writes.push((m.start(), m.as_str().to_string()));
         }
+    }
+    // Every write must have been resolved to a literal path above.
+    let total = ANY_PATH_WRITE.find_iter(script).count() + ANY_OPEN_WRITE.find_iter(script).count();
+    if writes.len() != total {
+        return None;
     }
     writes.sort_by_key(|(offset, _)| *offset);
     Some(writes.into_iter().map(|(_, path)| path).collect())
@@ -111,7 +156,11 @@ fn command_line(script: &str) -> Option<&str> {
     }
     let after = first[op + 2..].trim_start_matches('-').trim_start();
     let delimiter = shlex::split(after)?.into_iter().next()?;
-    if delimiter.is_empty() || !delimiter.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+    if delimiter.is_empty()
+        || !delimiter
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
         return None;
     }
     let quoted = after.starts_with(['\'', '"', '\\']);
@@ -176,7 +225,11 @@ fn shell_written_paths(script: &str) -> Option<Vec<String>> {
         start = i + len;
     }
     steps.push(&line[start..]);
-    let steps: Vec<&str> = steps.into_iter().map(str::trim).filter(|s| !s.is_empty()).collect();
+    let steps: Vec<&str> = steps
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
     // A heredoc feeds exactly one command.
     if script.contains('\n') && steps.len() != 1 {
         return None;
@@ -190,7 +243,8 @@ fn step_written_path(step: &str) -> Option<String> {
         return None;
     }
     let bare = unquoted(step);
-    if bare.contains(['&', ';']) || bare.contains("<(") || bare.contains(">(") {
+    // Unquoted `(` runs code in many forms: `<(…)`, zsh `=(…)` and glob qualifiers, subshells.
+    if bare.contains(['&', ';', '(']) {
         return None;
     }
     let heredoc = bare.contains("<<");
@@ -209,27 +263,47 @@ fn step_written_path(step: &str) -> Option<String> {
             let idx = tokens.iter().position(|t| t == "|")?;
             tee_target(&tokens[idx + 1..])
         }
-        "cat" | "echo" | "printf" if pipes == 0 && redirects == 1 => redirect_target(rest),
+        "cat" | "echo" | "printf" if pipes == 0 && redirects == 1 => redirect_target(step, &bare),
         "sed" if pipes == 0 && redirects == 0 => sed_in_place_target(rest),
         _ => None,
     }
 }
 
-/// `sed -i[suffix] ['…'] 's/a/b/flags' file` only: other sed commands and the `e`/`w` flags can
-/// run commands or write other files, so they are not summarized as an edit.
+/// `sed [-E|-r] -i[suffix] [''] [-e] 's/a/b/flags' file` only: other sed commands and the
+/// `e`/`w` flags can run commands or write other files, so they are not summarized as an edit.
 fn sed_in_place_target(args: &[String]) -> Option<String> {
-    let (flag, args) = args.split_first()?;
-    if !flag.starts_with("-i") {
-        return None;
+    let mut in_place = false;
+    let mut script: Option<&String> = None;
+    let mut operands: Vec<&String> = Vec::new();
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-E" | "-r" | "--regexp-extended" => {}
+            "-e" => {
+                if script.replace(iter.next()?).is_some() {
+                    return None;
+                }
+            }
+            flag if flag.starts_with("-i") => {
+                if in_place {
+                    return None;
+                }
+                in_place = true;
+                // macOS `-i ''` takes an empty backup suffix as the next argument.
+                if flag == "-i" && iter.peek().is_some_and(|next| next.is_empty()) {
+                    iter.next();
+                }
+            }
+            flag if flag.starts_with('-') => return None,
+            _ => operands.push(arg),
+        }
     }
-    let args = match args {
-        [empty, rest @ ..] if flag == "-i" && empty.is_empty() => rest,
-        _ => args,
+    let (script, file) = match (script, operands.as_slice()) {
+        (Some(script), [file]) => (script, *file),
+        (None, [script, file]) => (*script, *file),
+        _ => return None,
     };
-    let [script, file] = args else {
-        return None;
-    };
-    (is_plain_substitution(script) && !file.starts_with('-')).then(|| file.clone())
+    (in_place && is_plain_substitution(script)).then(|| file.clone())
 }
 
 fn is_plain_substitution(script: &str) -> bool {
@@ -260,18 +334,16 @@ fn is_plain_substitution(script: &str) -> bool {
         if flags.chars().all(|c| matches!(c, 'g' | 'i' | 'I' | 'p') || c.is_ascii_digit()))
 }
 
-fn redirect_target(tokens: &[String]) -> Option<String> {
-    let mut iter = tokens.iter();
-    while let Some(token) = iter.next() {
-        let target = match token.as_str() {
-            ">" | ">>" => iter.next()?.clone(),
-            t if t.starts_with(">>") => t[2..].to_string(),
-            t if t.starts_with('>') => t[1..].to_string(),
-            _ => continue,
-        };
-        return Some(target);
+/// The word after the step's one unquoted `>`/`>>`, located in `bare` so a quoted `'>x'`
+/// argument is never mistaken for the redirect.
+fn redirect_target(step: &str, bare: &str) -> Option<String> {
+    let at = bare.find('>')?;
+    // `2> f` captures stderr only; it is not the command writing `f`.
+    if bare[..at].ends_with(|c: char| c.is_ascii_digit()) {
+        return None;
     }
-    None
+    let after = step[at..].trim_start_matches('>');
+    shlex::split(after)?.into_iter().next()
 }
 
 fn tee_target(tokens: &[String]) -> Option<String> {
@@ -286,7 +358,9 @@ fn is_literal_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with("/dev/")
         && !path.starts_with('&')
-        && !path.contains(['$', '*', '?', '`', '(', ')', '{', '}', '<', '>', '&', '|', ';'])
+        && !path.contains([
+            '$', '*', '?', '`', '(', ')', '{', '}', '<', '>', '&', '|', ';',
+        ])
         && !path.contains(char::is_whitespace)
 }
 
@@ -453,10 +527,7 @@ mod tests {
 
     #[test]
     fn heredoc_delimiter_must_be_plain_word() {
-        assert_eq!(
-            edited_paths(&sh("cat > f <<'E;rm x'\nhi\nE;rm x")),
-            None
-        );
+        assert_eq!(edited_paths(&sh("cat > f <<'E;rm x'\nhi\nE;rm x")), None);
     }
 
     #[test]
@@ -479,6 +550,74 @@ mod tests {
             "sed -i 's/a/b/g' f.txt",
             "sed -i.bak 's|a|b|' f.txt",
             "sed -i '' 's#a/b#c#2' f.txt",
+        ] {
+            assert_eq!(edited_paths(&sh(script)), some(&["f.txt"]), "{script}");
+        }
+    }
+    #[test]
+    fn ansi_c_quoting_is_not_edit() {
+        for script in [
+            r#"echo $'\'';rm -rf x;echo '\' > f"#,
+            r#"python3 -c $'\'';rm -rf x;echo 'open("a","w")\'"#,
+            r#"echo $"x" > f"#,
+        ] {
+            assert_eq!(edited_paths(&sh(script)), None, "{script}");
+        }
+    }
+
+    #[test]
+    fn unquoted_parens_are_not_edit() {
+        for script in [
+            "echo =(rm -rf x) > f",
+            "echo *(e:'rm -rf x':) > f",
+            "echo @(Remove-Item x) > f",
+        ] {
+            assert_eq!(edited_paths(&sh(script)), None, "{script}");
+        }
+    }
+
+    #[test]
+    fn powershell_is_never_edit() {
+        let cmd = vec![
+            "pwsh".to_string(),
+            "-Command".to_string(),
+            "echo hi > f.txt".to_string(),
+        ];
+        assert_eq!(edited_paths(&cmd), None);
+    }
+
+    #[test]
+    fn redirect_target_ignores_quoted_angle() {
+        assert_eq!(
+            edited_paths(&sh("echo '>seq1' > seqs.fa")),
+            some(&["seqs.fa"])
+        );
+        assert_eq!(edited_paths(&sh("echo \">\" x > f")), some(&["f"]));
+        assert_eq!(edited_paths(&sh("echo hi 2> err.log")), None);
+    }
+
+    #[test]
+    fn python_with_side_effects_is_not_edit() {
+        for body in [
+            "import shutil; shutil.rmtree('build')\nopen('a','w').write('')",
+            "import subprocess\nsubprocess.run(['ls'])\nopen('a','w').write('')",
+            "import os\nos.remove('b')\nopen('a','w').write('')",
+            "open('a','w').write(x)\nopen(name,'w').write(y)",
+            "from pathlib import Path\np = Path('a')\np = p.with_suffix('.bak')\np.write_text('x')",
+            "from pathlib import Path\nPath('a').write_text('x')\nget().write_text('y')",
+        ] {
+            let script = format!("python3 - <<'PY'\n{body}\nPY");
+            assert_eq!(edited_paths(&sh(&script)), None, "{body}");
+        }
+    }
+
+    #[test]
+    fn sed_common_flag_forms_are_edits() {
+        for script in [
+            "sed -i -e 's/a/b/' f.txt",
+            "sed -i '' -e 's/a/b/' f.txt",
+            "sed -E -i 's/a+/b/' f.txt",
+            "sed -i -E 's/a+/b/' f.txt",
         ] {
             assert_eq!(edited_paths(&sh(script)), some(&["f.txt"]), "{script}");
         }

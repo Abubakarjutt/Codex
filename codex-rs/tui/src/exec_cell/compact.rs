@@ -6,8 +6,8 @@ use super::concise::OUTPUT_PREFIX_WIDTH;
 use super::concise::OUTPUT_REST_PREFIX;
 use super::concise::command_label;
 use super::concise::exit_suffix;
-use super::concise::summary_line;
 use super::concise::first_line;
+use super::concise::summary_line;
 use super::model::ExecCell;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell::ActivityDisclosure;
@@ -113,7 +113,8 @@ impl ExecCell {
             is_update = update;
             header.spans.extend(label);
         }
-        let suffix = nonzero_exit.map(|output| exit_suffix(output.exit_code, /*benign*/ false));
+        let suffix =
+            nonzero_exit.map(|output| exit_suffix(output.exit_code, /*benign*/ false));
         let mut lines = vec![summary_line(header, suffix, width)];
         let show_output = !is_update || nonzero_exit.is_some();
         if let Some(output) = call.output.as_ref().filter(|_| show_output) {
