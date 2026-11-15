@@ -1161,8 +1161,9 @@ impl ChatWidget {
                 self.token_usage_pending = true;
                 self.bottom_pane
                     .set_context_window_pending(/*pending*/ true);
-                self.bottom_pane
-                    .set_context_window(/*percent*/ None, /*used_tokens*/ None);
+                self.bottom_pane.set_context_window(
+                    /*percent*/ None, /*used_tokens*/ None, /*window_tokens*/ None,
+                );
                 self.token_info = None;
             }
         }
@@ -1174,7 +1175,9 @@ impl ChatWidget {
             .set_context_window_pending(/*pending*/ false);
         let percent = self.context_remaining_percent(&info);
         let used_tokens = self.context_used_tokens(&info, percent.is_some());
-        self.bottom_pane.set_context_window(percent, used_tokens);
+        let window_tokens = info.model_context_window.filter(|window| *window > 0);
+        self.bottom_pane
+            .set_context_window(percent, used_tokens, window_tokens);
         self.token_info = Some(info);
     }
 
@@ -1185,9 +1188,12 @@ impl ChatWidget {
         })
     }
 
+    /// Tokens to show as "used". When the window is known this is the size of the
+    /// most recent prompt (what actually occupies the context); otherwise it falls
+    /// back to the accumulated session total, as before.
     fn context_used_tokens(&self, info: &TokenUsageInfo, percent_known: bool) -> Option<i64> {
         if percent_known {
-            return None;
+            return Some(info.last_token_usage.tokens_in_context_window());
         }
 
         Some(info.total_token_usage.tokens_in_context_window())
@@ -1198,8 +1204,10 @@ impl ChatWidget {
             match saved {
                 Some(info) => self.apply_token_info(info),
                 None => {
-                    self.bottom_pane
-                        .set_context_window(/*percent*/ None, /*used_tokens*/ None);
+                    self.bottom_pane.set_context_window(
+                        /*percent*/ None, /*used_tokens*/ None,
+                        /*window_tokens*/ None,
+                    );
                     self.token_info = None;
                 }
             }
