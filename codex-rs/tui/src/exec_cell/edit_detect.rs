@@ -50,6 +50,19 @@ fn is_python(word: &str) -> bool {
 }
 
 fn python_written_paths(script: &str) -> Option<Vec<String>> {
+    // Only a lone `python3 -c "…"` or `python3 - <<'PY' … PY`; anything else may run more commands.
+    let lone_c = matches!(shlex::split(script).as_deref(), Some([_, flag, _]) if flag == "-c");
+    if !lone_c {
+        let tokens = shlex::split(command_line(script)?)?;
+        let heredoc_only = match tokens.as_slice() {
+            [_, dash, op] => dash == "-" && op.len() > 2 && op.starts_with("<<"),
+            [_, dash, op, _] => dash == "-" && (op == "<<" || op == "<<-"),
+            _ => false,
+        };
+        if !heredoc_only || !script.contains('\n') {
+            return None;
+        }
+    }
     let bindings: Vec<(&str, &str)> = PATH_BINDING
         .captures_iter(script)
         .filter_map(|c| Some((c.get(1)?.as_str(), c.get(2)?.as_str())))
@@ -78,36 +91,118 @@ fn python_written_paths(script: &str) -> Option<Vec<String>> {
     Some(writes.into_iter().map(|(_, path)| path).collect())
 }
 
-/// Every `&&`/`;` step on the first line must be a write (`cat|echo|printf > f`, `| tee f`,
-/// `sed -i … f`); a heredoc body after the first line is content, not commands.
-fn shell_written_paths(script: &str) -> Option<Vec<String>> {
-    let mut lines = script.lines();
-    let first = lines.next()?;
-    if lines.next().is_some() && !first.contains("<<") {
+/// The script's single command line. Later lines are accepted only as one heredoc body whose
+/// terminator is the last line; anything after the terminator would be more commands.
+fn command_line(script: &str) -> Option<&str> {
+    let lines: Vec<&str> = script.lines().collect();
+    let (first, rest) = lines.split_first()?;
+    let Some((last, body)) = rest.split_last() else {
+        return (!unquoted(first).contains("<<")).then_some(*first);
+    };
+    let bare = unquoted(first);
+    let op = bare.find("<<")?;
+    if bare[op..].starts_with("<<<") || bare[op + 2..].contains("<<") {
         return None;
     }
-    let mut paths = Vec::new();
-    for step in first.split("&&").flat_map(|s| s.split(';')) {
-        let step = step.trim();
-        if step.is_empty() {
-            continue;
+    let after = first[op + 2..].trim_start_matches('-').trim_start();
+    let delimiter = shlex::split(after)?.into_iter().next()?;
+    let quoted = after.starts_with(['\'', '"', '\\']);
+    let terminated = last.trim() == delimiter && !body.iter().any(|l| l.trim() == delimiter);
+    // An unquoted heredoc still runs `$(…)` and backticks inside its body.
+    let inert = quoted || !body.iter().any(|l| l.contains("$(") || l.contains('`'));
+    (terminated && inert).then_some(*first)
+}
+
+/// `line` with quoted and escaped text blanked to `_` (same byte length), so shell operators
+/// can be located without being fooled by quoted characters.
+fn unquoted(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in line.chars() {
+        let blank = if escaped {
+            escaped = false;
+            true
+        } else if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else if c == '\\' && q == '"' {
+                escaped = true;
+            }
+            true
+        } else if c == '\'' || c == '"' {
+            quote = Some(c);
+            true
+        } else if c == '\\' {
+            escaped = true;
+            true
+        } else {
+            false
+        };
+        if blank {
+            out.extend(std::iter::repeat_n('_', c.len_utf8()));
+        } else {
+            out.push(c);
         }
-        paths.push(step_written_path(step)?);
     }
-    Some(paths)
+    out
+}
+
+/// Every `&&`/`;` step must be a write (`cat|echo|printf > f`, `| tee f`, `sed -i … f`).
+fn shell_written_paths(script: &str) -> Option<Vec<String>> {
+    let line = command_line(script)?;
+    let bare = unquoted(line);
+    let mut steps = Vec::new();
+    let mut start = 0;
+    let mut chars = bare.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let len = match c {
+            ';' => 1,
+            '&' if chars.peek().is_some_and(|(_, n)| *n == '&') => {
+                chars.next();
+                2
+            }
+            _ => continue,
+        };
+        steps.push(&line[start..i]);
+        start = i + len;
+    }
+    steps.push(&line[start..]);
+    let steps: Vec<&str> = steps.into_iter().map(str::trim).filter(|s| !s.is_empty()).collect();
+    // A heredoc feeds exactly one command.
+    if script.contains('\n') && steps.len() != 1 {
+        return None;
+    }
+    steps.into_iter().map(step_written_path).collect()
 }
 
 fn step_written_path(step: &str) -> Option<String> {
-    let tokens = shlex::split(step)?;
+    // Substitutions run commands even inside double quotes.
+    if step.contains("$(") || step.contains('`') {
+        return None;
+    }
+    let bare = unquoted(step);
+    if bare.contains(['&', ';']) || bare.contains("<(") || bare.contains(">(") {
+        return None;
+    }
+    let heredoc = bare.contains("<<");
+    let redirects = bare.matches('>').count() - bare.matches(">>").count()
+        + bare.matches('<').count()
+        - if heredoc { 2 } else { 0 };
+    let pipes = bare.matches('|').count();
+    let mut tokens = shlex::split(step)?;
+    if let Some(idx) = tokens.iter().position(|t| t.starts_with("<<")) {
+        let bare_op = tokens[idx] == "<<" || tokens[idx] == "<<-";
+        tokens.drain(idx..(idx + if bare_op { 2 } else { 1 }).min(tokens.len()));
+    }
     let (head, rest) = tokens.split_first()?;
     match head.as_str() {
-        "cat" | "echo" | "printf" => {
-            if let Some(idx) = tokens.iter().position(|t| t == "|") {
-                return tee_target(&tokens[idx + 1..]);
-            }
-            redirect_target(rest)
+        "cat" | "echo" | "printf" if pipes == 1 && redirects == 0 => {
+            let idx = tokens.iter().position(|t| t == "|")?;
+            tee_target(&tokens[idx + 1..])
         }
-        "sed" if rest.iter().any(|t| t.starts_with("-i")) => {
+        "cat" | "echo" | "printf" if pipes == 0 && redirects == 1 => redirect_target(rest),
+        "sed" if pipes == 0 && redirects == 0 && rest.iter().any(|t| t.starts_with("-i")) => {
             rest.last().filter(|t| !t.starts_with('-')).cloned()
         }
         _ => None,
@@ -139,7 +234,9 @@ fn tee_target(tokens: &[String]) -> Option<String> {
 fn is_literal_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with("/dev/")
-        && !path.contains(['$', '*', '?', '`', '(', ')', '{', '}', '<', '>'])
+        && !path.starts_with('&')
+        && !path.contains(['$', '*', '?', '`', '(', ')', '{', '}', '<', '>', '&', '|', ';'])
+        && !path.contains(char::is_whitespace)
 }
 
 #[cfg(test)]
@@ -232,5 +329,64 @@ mod tests {
     #[test]
     fn dev_null_ignored() {
         assert_eq!(edited_paths(&sh("echo hi > /dev/null")), None);
+    }
+    // Review Focus 1: a write must never hide another command that runs with it.
+    #[test]
+    fn heredoc_followed_by_command_is_not_edit() {
+        let script = "cat > run.sh <<'EOF'\necho hi\nEOF\nchmod +x run.sh && ./run.sh";
+        assert_eq!(edited_paths(&sh(script)), None);
+    }
+
+    #[test]
+    fn quoted_heredoc_marker_is_not_heredoc() {
+        assert_eq!(edited_paths(&sh("echo \"a << b\" > f\nrm -rf x")), None);
+    }
+
+    #[test]
+    fn other_separators_are_not_edits() {
+        for script in [
+            "cat > f || rm -rf build",
+            "echo x > f & rm -rf ~",
+            "echo x > f |sh",
+            "echo x > f | sh",
+            "echo x > f > g",
+        ] {
+            assert_eq!(edited_paths(&sh(script)), None, "{script}");
+        }
+    }
+
+    #[test]
+    fn command_substitution_is_not_edit() {
+        for script in [
+            "echo $(rm -rf build) > f",
+            "echo `curl x|sh` > f",
+            "cat <(rm -rf x) > f",
+        ] {
+            assert_eq!(edited_paths(&sh(script)), None, "{script}");
+        }
+    }
+
+    #[test]
+    fn python_followed_by_command_is_not_edit() {
+        for script in [
+            "python3 -c \"open('a','w').write('')\" && rm -rf build",
+            "python3 - <<'PY'\nopen('a','w').write('')\nPY\nrm -rf build",
+        ] {
+            assert_eq!(edited_paths(&sh(script)), None, "{script}");
+        }
+    }
+
+    #[test]
+    fn stderr_redirect_is_not_edit() {
+        assert_eq!(edited_paths(&sh("echo \"error: missing\" >&2")), None);
+    }
+
+    #[test]
+    fn tee_and_chained_writes_still_detected() {
+        assert_eq!(edited_paths(&sh("echo x | tee -a f.txt")), some(&["f.txt"]));
+        assert_eq!(
+            edited_paths(&sh("echo a > x.txt && echo b >> y.txt")),
+            some(&["x.txt", "y.txt"])
+        );
     }
 }

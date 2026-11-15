@@ -423,11 +423,12 @@ impl ExecCell {
             };
             let mut spans = vec![marker, " ".into()];
             spans.extend(label);
-            if let Some(code) = exit_code {
-                spans.push(concise::exit_suffix(code, benign));
-            }
+            let suffix = exit_code.map(|code| concise::exit_suffix(code, benign));
             let failed = exit_code.is_some() && !benign;
-            out.push((clipped_line(Line::from(spans), width), failed));
+            out.push((
+                concise::summary_line(Line::from(spans), suffix, width),
+                failed,
+            ));
         }
         out
     }
@@ -637,15 +638,14 @@ impl ExecCell {
         let (label, is_update) = concise::command_label(&call.command);
         let mut header = Line::from(vec![marker, " ".into()]);
         header.spans.extend(label);
-        if let Some(code) = failed_code {
-            header.push_span(concise::exit_suffix(code, /*benign*/ false));
-        }
-        let mut hidden_details = header.width() > usize::from(width)
+        let suffix = failed_code.map(|code| concise::exit_suffix(code, /*benign*/ false));
+        let mut hidden_details = header.width() + suffix.as_ref().map_or(0, ratatui::text::Span::width)
+            > usize::from(width)
             || strip_bash_lc_and_escape(&call.command)
                 .lines()
                 .nth(1)
                 .is_some();
-        let mut lines = vec![clipped_line(header, width)];
+        let mut lines = vec![concise::summary_line(header, suffix, width)];
 
         // A successful edit's output is noise; a failed one explains the failure.
         let show_output = !is_update || failed_code.is_some();
@@ -1396,4 +1396,56 @@ mod tests {
             "expected the complete URL, got: {rendered:?}"
         );
     }
+    fn finished_cell(command: &str, parsed: Vec<ParsedCommand>, exit_code: i32) -> ExecCell {
+        let mut cell = new_active_exec_command(
+            "call-id".to_string(),
+            vec!["bash".into(), "-lc".into(), command.into()],
+            parsed,
+            ExecCommandSource::Agent,
+            /*interaction_input*/ None,
+            /*animations_enabled*/ false,
+        );
+        cell.complete_call(
+            "call-id",
+            CommandOutput::new(exit_code, "boom".to_string()),
+            std::time::Duration::from_millis(1),
+        );
+        cell
+    }
+
+    fn assert_keeps_exit(line: &Line<'static>, width: u16, code: i32) {
+        let text = render_line_text(line);
+        assert!(text.ends_with(&format!(" · exit {code}")), "{text:?}");
+        assert!(text.contains('…'), "{text:?}");
+        assert!(line.width() <= usize::from(width), "{text:?}");
+    }
+
+    // Review Focus 3 + 5: a clipped summary line still shows the exit code.
+    #[test]
+    fn narrow_failed_command_keeps_exit_code() {
+        let cell = finished_cell(
+            "pytest tests/very/long/path/test_something.py -k 'expensive and slow'",
+            Vec::new(),
+            1,
+        );
+        assert_keeps_exit(&cell.display_lines(/*width*/ 40)[0], 40, 1);
+        assert_keeps_exit(&visible_lines(cell.compact_hyperlink_lines(/*width*/ 40))[0], 40, 1);
+    }
+
+    #[test]
+    fn narrow_failed_read_keeps_exit_code() {
+        let name = "a/very/long/path/to/some/deeply/nested/file_name.rs";
+        let cell = finished_cell(
+            &format!("cat {name}"),
+            vec![ParsedCommand::Read {
+                cmd: format!("cat {name}"),
+                name: name.to_string(),
+                path: name.into(),
+            }],
+            2,
+        );
+        assert_keeps_exit(&cell.display_lines(/*width*/ 40)[0], 40, 2);
+        assert_keeps_exit(&visible_lines(cell.compact_hyperlink_lines(/*width*/ 40))[0], 40, 2);
+    }
 }
+

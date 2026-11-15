@@ -3,8 +3,11 @@
 
 use super::edit_detect::edited_paths;
 use crate::exec_command::strip_bash_lc_and_escape;
+use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
+use crate::terminal_hyperlinks::HyperlinkLine;
 use codex_protocol::parse_command::ParsedCommand;
 use ratatui::style::Stylize;
+use ratatui::text::Line;
 use ratatui::text::Span;
 
 pub(super) const MARKER: &str = "⏺";
@@ -66,6 +69,19 @@ pub(super) fn reads_label(names: &[String]) -> Vec<Span<'static>> {
 pub(super) fn exit_suffix(code: i32, benign: bool) -> Span<'static> {
     let text = format!(" · exit {code}");
     if benign { text.dim() } else { text.red() }
+}
+
+/// A summary row clipped to `width`. The exit suffix is kept whole, so a failure stays visible
+/// even when the label is cut.
+pub(super) fn summary_line(
+    label: Line<'static>,
+    suffix: Option<Span<'static>>,
+    width: u16,
+) -> HyperlinkLine {
+    let room = usize::from(width).saturating_sub(suffix.as_ref().map_or(0, Span::width));
+    let mut line = truncate_line_with_ellipsis_if_overflow(label, room);
+    line.spans.extend(suffix);
+    line.into()
 }
 
 fn tool(name: &'static str, arg: String) -> Vec<Span<'static>> {

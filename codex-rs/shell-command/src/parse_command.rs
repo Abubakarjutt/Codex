@@ -1357,6 +1357,25 @@ mod tests {
         );
     }
 
+    // A find that deletes or runs commands is not a read-only search.
+    #[test]
+    fn find_with_side_effects_is_unknown() {
+        for cmd in [
+            "find . -name '*.o' -delete",
+            "find . -name x -exec rm -rf {} +",
+            "find . -type f -execdir rm {} ;",
+            "find . -name x -ok rm {} ;",
+            "find . -name x -fprint out.txt",
+        ] {
+            assert_parsed(
+                &shlex_split_safe(cmd),
+                vec![ParsedCommand::Unknown {
+                    cmd: shlex_join(&shlex_split_safe(cmd)),
+                }],
+            );
+        }
+    }
+
     #[test]
     fn find_type_only_path() {
         assert_parsed(
@@ -2710,6 +2729,16 @@ fn summarize_main_tokens(main_cmd: &[String]) -> ParsedCommand {
             }
         }
         Some((head, tail)) if head == "find" => {
+            // A find that deletes files or runs commands is not a read-only search.
+            if tail.iter().any(|arg| {
+                matches!(arg.as_str(), "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir")
+                    || arg.starts_with("-fprint")
+                    || arg.starts_with("-fls")
+            }) {
+                return ParsedCommand::Unknown {
+                    cmd: shlex_join(main_cmd),
+                };
+            }
             // Basic find support: capture path and common name filter
             let (query, path) = parse_find_query_and_path(tail);
             if query.is_some() {

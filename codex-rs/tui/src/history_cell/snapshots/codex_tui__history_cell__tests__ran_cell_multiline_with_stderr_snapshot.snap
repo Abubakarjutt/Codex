@@ -3,7 +3,7 @@ source: tui/src/history_cell/tests.rs
 assertion_line: 2471
 expression: rendered
 ---
-⏺ Bash(echo this_is_a_very_…
+⏺ Bash(echo this_i… · exit 1
   ⎿  error: first line on
      stderr
      error: second line on
