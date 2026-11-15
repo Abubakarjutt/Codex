@@ -841,7 +841,11 @@ fn active_side_action_keeps_plan_expanded_on_the_other_row() {
 fn oversized_goal_yields_to_an_eligible_whole_hint_with_status_disabled() {
     let mut composer = composer();
     composer.set_status_line_enabled(/*enabled*/ false);
-    composer.set_context_window(Some(100), /*used_tokens*/ None);
+    composer.set_context_window(
+        Some(100),
+        /*used_tokens*/ None,
+        /*window_tokens*/ None,
+    );
     let (text, _) = render(&composer, /*width*/ 18, /*footer*/ None);
     assert_eq!(text.lines().last().map(str::trim), Some("? for shortcuts"));
     let (text, _) = render(&composer, /*width*/ 20, /*footer*/ None);

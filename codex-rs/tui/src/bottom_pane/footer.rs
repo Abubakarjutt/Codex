@@ -930,7 +930,15 @@ fn esc_hint_line(esc_backtrack_hint: bool) -> Line<'static> {
     }
 }
 
-pub(crate) fn context_window_line(percent: Option<i64>, used_tokens: Option<i64>) -> Line<'static> {
+pub(crate) fn context_window_line(
+    percent: Option<i64>,
+    used_tokens: Option<i64>,
+    window_tokens: Option<i64>,
+) -> Line<'static> {
+    if let (Some(percent), Some(used), Some(window)) = (percent, used_tokens, window_tokens) {
+        return context_usage_with_window_line(percent, used, window);
+    }
+
     if let Some(percent) = percent {
         let percent = percent.clamp(0, 100);
         return Line::from(vec![
@@ -950,6 +958,26 @@ pub(crate) fn context_window_line(percent: Option<i64>, used_tokens: Option<i64>
     ])
 }
 
+/// Footer text when the model's window size is known, e.g. `45.2K / 272K tokens · 83% left`.
+///
+/// `used_tokens` is the size of the most recent prompt (raw), `window_tokens` the
+/// model's full context window (raw), and `percent_left` the baseline-adjusted
+/// remaining percentage Codex has always shown (it ignores ~12K of fixed overhead,
+/// so it is not exactly `1 - used / window`).
+fn context_usage_with_window_line(
+    percent_left: i64,
+    used_tokens: i64,
+    window_tokens: i64,
+) -> Line<'static> {
+    let percent_left = percent_left.clamp(0, 100);
+    let used = format_tokens_compact(used_tokens);
+    let window = format_tokens_compact(window_tokens);
+    Line::from(vec![
+        Span::from(format!("{used} / {window} tokens · {percent_left}% left"))
+            .set_style(secondary_text_style()),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -960,6 +988,35 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::Backend;
     use ratatui::backend::TestBackend;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn context_line_shows_used_and_window_tokens_when_window_known() {
+        let line = context_window_line(Some(83), Some(45_231), Some(272_000));
+        assert_eq!(line_text(&line), "45.2K / 272K tokens · 83% left");
+    }
+
+    #[test]
+    fn context_line_falls_back_when_window_unknown() {
+        assert_eq!(
+            line_text(&context_window_line(None, Some(1_200_000), None)),
+            "1.2M used"
+        );
+        assert_eq!(
+            line_text(&context_window_line(Some(50), None, None)),
+            "50% context left"
+        );
+        assert_eq!(
+            line_text(&context_window_line(None, None, None)),
+            "100% context left"
+        );
+    }
 
     #[test]
     fn voice_live_microphone_indicator_is_red() {
@@ -1015,7 +1072,7 @@ mod tests {
             /*width*/ 80,
             &props,
             /*collaboration_mode_indicator*/ None,
-            context_window_line(percent, used_tokens),
+            context_window_line(percent, used_tokens, /*window_tokens*/ None),
         );
     }
 
@@ -1203,7 +1260,9 @@ mod tests {
             width,
             props,
             collaboration_mode_indicator,
-            context_window_line(/*percent*/ None, /*used_tokens*/ None),
+            context_window_line(
+                /*percent*/ None, /*used_tokens*/ None, /*window_tokens*/ None,
+            ),
         );
     }
 
@@ -1261,7 +1320,9 @@ mod tests {
             props,
             collaboration_mode_indicator,
             ide_context_active,
-            context_window_line(/*percent*/ None, /*used_tokens*/ None),
+            context_window_line(
+                /*percent*/ None, /*used_tokens*/ None, /*window_tokens*/ None,
+            ),
         );
         assert_snapshot!(name, terminal.backend());
     }
@@ -1561,7 +1622,11 @@ mod tests {
             /*width*/ 120,
             &props,
             Some(CollaborationModeIndicator::Plan),
-            context_window_line(Some(50), /*used_tokens*/ None),
+            context_window_line(
+                Some(50),
+                /*used_tokens*/ None,
+                /*window_tokens*/ None,
+            ),
         );
 
         snapshot_footer_with_indicators(
@@ -1591,7 +1656,11 @@ mod tests {
             /*width*/ 120,
             &props,
             Some(CollaborationModeIndicator::Plan),
-            context_window_line(Some(50), /*used_tokens*/ None),
+            context_window_line(
+                Some(50),
+                /*used_tokens*/ None,
+                /*window_tokens*/ None,
+            ),
         );
 
         let props = FooterProps {
@@ -1614,7 +1683,11 @@ mod tests {
             /*width*/ 120,
             &props,
             /*collaboration_mode_indicator*/ None,
-            context_window_line(Some(50), /*used_tokens*/ None),
+            context_window_line(
+                Some(50),
+                /*used_tokens*/ None,
+                /*window_tokens*/ None,
+            ),
         );
 
         let props = FooterProps {
@@ -1642,7 +1715,11 @@ mod tests {
             /*width*/ 40,
             &props,
             Some(CollaborationModeIndicator::Plan),
-            context_window_line(Some(50), /*used_tokens*/ None),
+            context_window_line(
+                Some(50),
+                /*used_tokens*/ None,
+                /*window_tokens*/ None,
+            ),
         );
 
         let props = FooterProps {
@@ -1701,7 +1778,11 @@ mod tests {
             /*width*/ 80,
             &props,
             Some(CollaborationModeIndicator::Plan),
-            context_window_line(Some(50), /*used_tokens*/ None),
+            context_window_line(
+                Some(50),
+                /*used_tokens*/ None,
+                /*window_tokens*/ None,
+            ),
         );
         let collapsed = screen.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(

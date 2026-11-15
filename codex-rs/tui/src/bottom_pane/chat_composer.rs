@@ -790,6 +790,7 @@ impl ChatComposer {
                 flash: None,
                 context_window_percent: None,
                 context_window_used_tokens: None,
+                context_window_tokens: None,
                 context_window_pending: false,
                 collaboration_mode_indicator: None,
                 goal_status_indicator: None,
@@ -1504,6 +1505,7 @@ impl ChatComposer {
             context_window_line(
                 self.footer.context_window_percent,
                 self.footer.context_window_used_tokens,
+                self.footer.context_window_tokens,
             )
         };
         if let Some(vim_mode) = self.vim_mode_indicator_span() {
@@ -4464,14 +4466,15 @@ impl ChatComposer {
         self.queue_submissions = queue_submissions;
     }
 
-    pub(crate) fn set_context_window(&mut self, percent: Option<i64>, used_tokens: Option<i64>) {
-        if self.footer.context_window_percent == percent
-            && self.footer.context_window_used_tokens == used_tokens
-        {
-            return;
-        }
+    pub(crate) fn set_context_window(
+        &mut self,
+        percent: Option<i64>,
+        used_tokens: Option<i64>,
+        window_tokens: Option<i64>,
+    ) {
         self.footer.context_window_percent = percent;
         self.footer.context_window_used_tokens = used_tokens;
+        self.footer.context_window_tokens = window_tokens;
     }
 
     pub(crate) fn set_context_window_pending(&mut self, pending: bool) {
@@ -5798,7 +5801,11 @@ mod tests {
         ) {
             composer.set_collaboration_modes_enabled(/*enabled*/ true);
             composer.set_collaboration_mode_indicator(indicator);
-            composer.set_context_window(Some(context_percent), /*used_tokens*/ None);
+            composer.set_context_window(
+                Some(context_percent),
+                /*used_tokens*/ None,
+                /*window_tokens*/ None,
+            );
         }
 
         // Empty textarea, agent idle: shortcuts hint can show, and cycle hint is hidden.

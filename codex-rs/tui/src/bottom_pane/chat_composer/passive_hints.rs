@@ -342,6 +342,7 @@ impl ChatComposer {
                 [context_window_line(
                     self.footer.context_window_percent,
                     self.footer.context_window_used_tokens,
+                    self.footer.context_window_tokens,
                 )],
             );
         }
