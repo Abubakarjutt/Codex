@@ -51,7 +51,12 @@ fn is_python(word: &str) -> bool {
 
 fn python_written_paths(script: &str) -> Option<Vec<String>> {
     // Only a lone `python3 -c "…"` or `python3 - <<'PY' … PY`; anything else may run more commands.
-    let lone_c = matches!(shlex::split(script).as_deref(), Some([_, flag, _]) if flag == "-c");
+    // shlex keeps `"…";id` as one word, so shell operators are checked outside quotes too.
+    let bare = unquoted(script);
+    let lone_c = matches!(shlex::split(script).as_deref(), Some([_, flag, _]) if flag == "-c")
+        && !bare.contains([';', '&', '|', '<', '>', '\n'])
+        && !script.contains("$(")
+        && !script.contains('`');
     if !lone_c {
         let tokens = shlex::split(command_line(script)?)?;
         let heredoc_only = match tokens.as_slice() {
@@ -106,6 +111,9 @@ fn command_line(script: &str) -> Option<&str> {
     }
     let after = first[op + 2..].trim_start_matches('-').trim_start();
     let delimiter = shlex::split(after)?.into_iter().next()?;
+    if delimiter.is_empty() || !delimiter.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
     let quoted = after.starts_with(['\'', '"', '\\']);
     let terminated = last.trim() == delimiter && !body.iter().any(|l| l.trim() == delimiter);
     // An unquoted heredoc still runs `$(…)` and backticks inside its body.
@@ -202,11 +210,54 @@ fn step_written_path(step: &str) -> Option<String> {
             tee_target(&tokens[idx + 1..])
         }
         "cat" | "echo" | "printf" if pipes == 0 && redirects == 1 => redirect_target(rest),
-        "sed" if pipes == 0 && redirects == 0 && rest.iter().any(|t| t.starts_with("-i")) => {
-            rest.last().filter(|t| !t.starts_with('-')).cloned()
-        }
+        "sed" if pipes == 0 && redirects == 0 => sed_in_place_target(rest),
         _ => None,
     }
+}
+
+/// `sed -i[suffix] ['…'] 's/a/b/flags' file` only: other sed commands and the `e`/`w` flags can
+/// run commands or write other files, so they are not summarized as an edit.
+fn sed_in_place_target(args: &[String]) -> Option<String> {
+    let (flag, args) = args.split_first()?;
+    if !flag.starts_with("-i") {
+        return None;
+    }
+    let args = match args {
+        [empty, rest @ ..] if flag == "-i" && empty.is_empty() => rest,
+        _ => args,
+    };
+    let [script, file] = args else {
+        return None;
+    };
+    (is_plain_substitution(script) && !file.starts_with('-')).then(|| file.clone())
+}
+
+fn is_plain_substitution(script: &str) -> bool {
+    let mut chars = script.chars();
+    let (Some('s'), Some(delim)) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    if delim.is_alphanumeric() || delim == '\\' || delim.is_whitespace() {
+        return false;
+    }
+    // Split on unescaped delimiters: pattern, replacement, flags.
+    let mut parts = vec![String::new()];
+    let mut escaped = false;
+    for c in chars {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == delim {
+            parts.push(String::new());
+            continue;
+        }
+        if let Some(part) = parts.last_mut() {
+            part.push(c);
+        }
+    }
+    matches!(parts.as_slice(), [_, _, flags]
+        if flags.chars().all(|c| matches!(c, 'g' | 'i' | 'I' | 'p') || c.is_ascii_digit()))
 }
 
 fn redirect_target(tokens: &[String]) -> Option<String> {
@@ -388,5 +439,48 @@ mod tests {
             edited_paths(&sh("echo a > x.txt && echo b >> y.txt")),
             some(&["x.txt", "y.txt"])
         );
+    }
+    #[test]
+    fn python_c_with_trailing_command_is_not_edit() {
+        for script in [
+            "python3 -c \"open('a','w').write('')\";id",
+            "python3 -c \"open('a','w').write('')\"|sh",
+            "python3 -c \"open('a','w').write('')\">log",
+        ] {
+            assert_eq!(edited_paths(&sh(script)), None, "{script}");
+        }
+    }
+
+    #[test]
+    fn heredoc_delimiter_must_be_plain_word() {
+        assert_eq!(
+            edited_paths(&sh("cat > f <<'E;rm x'\nhi\nE;rm x")),
+            None
+        );
+    }
+
+    #[test]
+    fn sed_that_executes_or_writes_elsewhere_is_not_edit() {
+        for script in [
+            "sed -i 's/x/y/e' f.txt",
+            "sed -i 's/x/y/w other' f.txt",
+            "sed -i '1e rm -rf x' f.txt",
+            "sed -i -f prog.sed f.txt",
+            "sed -i 's/a/b/' a.css b.css",
+            "sed -i -e 's/a/b/' -e 'r x' f.txt",
+        ] {
+            assert_eq!(edited_paths(&sh(script)), None, "{script}");
+        }
+    }
+
+    #[test]
+    fn sed_substitution_variants_are_edits() {
+        for script in [
+            "sed -i 's/a/b/g' f.txt",
+            "sed -i.bak 's|a|b|' f.txt",
+            "sed -i '' 's#a/b#c#2' f.txt",
+        ] {
+            assert_eq!(edited_paths(&sh(script)), some(&["f.txt"]), "{script}");
+        }
     }
 }
